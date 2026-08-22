@@ -39,6 +39,10 @@ def _fibonacci_pair_gmpy2(n: int, mod: int) -> Tuple[int, int]:
 if _HAS_GMPY2:
     def fibonacci_pair(n: int, mod: int) -> Tuple[int, int]:
         """Return (F(n), F(n + 1)) modulo ``mod`` using fast doubling."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        if mod <= 0:
+            raise ValueError("mod must be positive")
         mod_mpz = gmpy2.mpz(mod)
         n_mpz = gmpy2.mpz(n)
         a, b = _fibonacci_pair_gmpy2(n_mpz, mod_mpz)
@@ -46,6 +50,10 @@ if _HAS_GMPY2:
 else:
     def fibonacci_pair(n: int, mod: int) -> Tuple[int, int]:
         """Return (F(n), F(n + 1)) modulo ``mod`` using fast doubling."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        if mod <= 0:
+            raise ValueError("mod must be positive")
         return _fibonacci_pair_python(n, mod)
 
 

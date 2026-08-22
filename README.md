@@ -16,7 +16,7 @@ It is designed for applications that need many low-latency encryption/decryption
 - A required deployment secret (`pepper`) kept outside the ciphertext
 - Versioned `FC3` ciphertext payloads by default
 - Optional `FC4` sequence-number binding and in-process replay protection
-- **Thread-safe key caching** in `CryptoContext` for repeated operations
+- **Thread-safe bounded key caching** in `CryptoContext` for repeated decryptions
 - **gmpy2 acceleration** (optional, with pure Python fallback) for ~4x KDF speedup
 
 ## Security Model
@@ -128,19 +128,18 @@ ciphertext = encrypt(message, password, salt, pepper, cipher_mode=CipherMode.CHA
 plaintext = decrypt(ciphertext, password, salt, pepper)
 ```
 
-### Using CryptoContext for Repeated Operations (Key Caching)
+### Using CryptoContext for Repeated Decryptions (Key Caching)
 
 ```python
-# Reuses derived keys across multiple encrypt/decrypt calls
+# Keeps context configuration together and caches repeated decryptions
 ctx = CryptoContext(password, salt, pepper)
 
-# First call derives and caches the key
-ct1 = ctx.encrypt("message 1")
-ct2 = ctx.encrypt("message 2")
+# Encryption still uses a fresh random salt and derives a per-payload key
+ct = ctx.encrypt("message")
 
-# Subsequent decrypts use cached keys
-pt1 = ctx.decrypt(ct1)
-pt2 = ctx.decrypt(ct2)
+# Repeated decryption of the same payload reuses the bounded cache
+pt1 = ctx.decrypt(ct)
+pt2 = ctx.decrypt(ct)
 
 # With replay protection
 ctx_rp = CryptoContext(password, salt, pepper, replay_protection=True)
@@ -156,52 +155,49 @@ The default public API uses:
 - `prime=2**256 - 2**32 - 977`
 - `cipher_mode=CipherMode.AES_GCM`
 
-Both `iterations` and `prime` can be overridden explicitly for experiments and benchmarks. Changing these values changes the derived keys, so the parameters must remain consistent between encryption and decryption.
+Both `iterations` and `prime` can be overridden explicitly for experiments and benchmarks. `iterations` must be positive and `prime` must be greater than one. Changing these values changes the derived keys, so the parameters must remain consistent between encryption and decryption.
 
 ## Performance
 
-On the development benchmark machine (Python 3.14, Apple Silicon, **with gmpy2**), v1.1.1 measured approximately:
+On the development benchmark machine (Python 3.14, Apple Silicon, **with gmpy2**), v1.1.2 measured approximately:
 
 | Configuration | Encrypt (16 B) | Decrypt (16 B) | Total |
 | --- | ---: | ---: | ---: |
-| **Default (256-bit, 128 iters)** | 16.6 ms | 16.6 ms | **33.2 ms** |
-| 256-bit, 64 iters | 8.3 ms | 8.3 ms | 16.6 ms |
-| 256-bit, 32 iters | 4.2 ms | 4.2 ms | 8.4 ms |
-| ChaCha20-Poly1305 | 16.6 ms | 17.0 ms | 33.6 ms |
+| **Default (256-bit, 128 iters)** | 16.6 ms | 16.7 ms | **33.3 ms** |
+| ChaCha20-Poly1305 | 16.5 ms | 16.6 ms | 33.1 ms |
 
 | Payload | Default Encrypt | Default Decrypt |
 | ---: | ---: | ---: |
-| 16 B | 16.6 ms | 16.6 ms |
-| 1 KiB | 16.8 ms | 16.9 ms |
-| 1 MiB | 20.2 ms | 19.8 ms |
+| 16 B | 16.6 ms | 16.7 ms |
+| 1 KiB | 16.5 ms | 16.6 ms |
+| 1 MiB | 22.8 ms | 23.0 ms |
 
 *Without gmpy2 (pure Python): multiply KDF time by ~4x (encrypt/decrypt ~67 ms default)*
 
-### v1.1.1 Improvements Over v1.1
+### v1.1.2 Improvements Over v1.1.1
 
-| Metric | v1.1 | v1.1.1 (with gmpy2) | Speedup |
+| Metric | v1.1.1 | v1.1.2 (with gmpy2) | Speedup |
 | --- | ---: | ---: | ---: |
-| KDF (128 iters) | ~67 ms | ~17 ms | **4x** |
-| Encrypt (16 B) | 33.4 ms | 16.6 ms | **2x** |
-| Decrypt (16 B) | 33.5 ms | 16.6 ms | **2x** |
+| Encrypt (16 B) | 16.6 ms | 16.6 ms | ~1x |
+| Decrypt (16 B) | 16.6 ms | 16.7 ms | ~1x |
 
 These are reference measurements, not performance guarantees. Benchmark the target edge hardware before deployment.
 
-### PyPI 0.1.5 vs v1.1.1
+### PyPI 0.1.5 vs v1.1.2
 
-The following comparison was run on the same machine against the published PyPI `0.1.5` wheel and the v1.1.1 implementation. The legacy release used its original `iterations=20` default and unauthenticated AES-CBC format; v1.1.1 uses `iterations=128`, full-seed derivation, a secret pepper, random salt, and authenticated encryption. This is therefore a release comparison, not an equal-security-configuration comparison.
+The following comparison was run on the same machine against the published PyPI `0.1.5` wheel and the v1.1.2 implementation. The legacy release used its original `iterations=20` default and unauthenticated AES-CBC format; v1.1.2 uses `iterations=128`, full-seed derivation, a secret pepper, random salt, and authenticated encryption. This is therefore a release comparison, not an equal-security-configuration comparison.
 
-| Payload | 0.1.5 Encrypt | v1.1.1 Encrypt | Speedup | 0.1.5 Decrypt | v1.1.1 Decrypt | Speedup |
+| Payload | 0.1.5 Encrypt | v1.1.2 Encrypt | Speedup | 0.1.5 Decrypt | v1.1.2 Decrypt | Speedup |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 16 B | 3443 ms | 16.6 ms | 207x | 3446 ms | 16.6 ms | 207x |
 | 1 KiB | 3471 ms | 16.8 ms | 206x | 3497 ms | 16.9 ms | 207x |
 | 1 MiB | 3524 ms | 20.2 ms | 174x | 3507 ms | 19.8 ms | 177x |
 
-The legacy values used three timed samples after one warmup; v1.1.1 values used seven timed samples after one warmup. Values are rounded and will vary by hardware.
+The legacy values used three timed samples after one warmup; v1.1.2 values used seven timed samples after one warmup. Values are rounded and will vary by hardware.
 
 ## Security Improvements
 
-Compared with the original PyPI `fibcrypt 0.1.5` release, `fibcrypt 1.1.1` includes:
+Compared with the original PyPI `fibcrypt 0.1.5` release, `fibcrypt 1.1.2` includes:
 
 - Modular fast-doubling Fibonacci arithmetic instead of unbounded intermediate matrix growth
 - A 256-bit default modulus instead of `65537`
@@ -214,13 +210,13 @@ Compared with the original PyPI `fibcrypt 0.1.5` release, `fibcrypt 1.1.1` inclu
 - **ChaCha20-Poly1305 AEAD** as an alternative cipher mode
 - Versioned `FC3`/`FC5` payloads with explicit format boundaries
 - Optional `FC4`/`FC6` sequence-number binding and in-process replay protection
-- **Thread-safe key caching** in `CryptoContext` for repeated operations
+- **Thread-safe bounded key caching** in `CryptoContext` for repeated decryptions
 - **gmpy2-accelerated Fibonacci arithmetic** with pure Python fallback
 - Approximately 174-207x lower measured latency than the published `0.1.5` artifact on the benchmark machine
 
 ## Statistical Testing
 
-An exploratory run of selected NIST SP 800-22 tests was performed against one 1,000,000-bit stream generated from v1.1 KDF outputs using the default `iterations=128` and 256-bit prime:
+An exploratory run of selected NIST SP 800-22 tests was performed against one 1,000,000-bit stream generated from the current KDF using the default `iterations=128` and 256-bit prime:
 
 | Test | p-value |
 | --- | ---: |
@@ -236,16 +232,16 @@ All observed p-values exceeded the exploratory threshold of `0.01`. These result
 
 ## Upgrading From 0.1.5
 
-Version 1.1.1 changes both the API and ciphertext format. Existing systems must not be upgraded blindly:
+Version 1.1.2 changes neither the current `FC3`/`FC4` wire format nor the v1.1.1 KDF for newly generated payloads. It also restores decryption of pre-HKDF v1.1.0 `FC3`/`FC4` payloads:
 
 1. Provision one high-entropy pepper through a secret manager or environment variable and make it available to every service that encrypts or decrypts the shared data.
 2. Update calls from `encrypt(plaintext, password, salt)` and `decrypt(ciphertext, password, salt)` to include the same pepper value.
 3. Keep the original `0.1.5` runtime available while migrating existing data.
-4. Decrypt each `0.1.5` ciphertext with the original package and credentials, then re-encrypt it with v1.1.1 and the managed pepper.
+4. Decrypt each `0.1.5` ciphertext with the original package and credentials, then re-encrypt it with v1.1.2 and the managed pepper.
 5. Verify the migrated plaintext or application record before replacing the old ciphertext.
 6. Test the migration on a backup or staging copy before rolling it out to production.
 
-The v0.1.5 format was `iv + ciphertext` and used different key derivation defaults. It has no authentication tag and is not readable by the `FC2`/`FC3`/`FC4`/`FC5`/`FC6` decoder. Existing authenticated `FC2` payloads remain decryptable, while new default calls produce `FC3` AES-GCM payloads. Replay-protected calls produce `FC4` payloads. ChaCha20 calls produce `FC5`/`FC6`. Losing the pepper makes ciphertexts unrecoverable.
+The v0.1.5 format was `iv + ciphertext` and used different key derivation defaults. It has no authentication tag and is not readable by the `FC2`/`FC3`/`FC4`/`FC5`/`FC6` decoder. Existing authenticated `FC2` payloads remain decryptable, while new default calls produce `FC3` AES-GCM payloads. Replay-protected calls produce `FC4` payloads. ChaCha20 calls produce `FC5`/`FC6`. A replay-protected `CryptoContext` requires `FC4` or `FC6` input and rejects stateless payloads. Losing the pepper makes ciphertexts unrecoverable.
 
 ## Development
 

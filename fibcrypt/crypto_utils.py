@@ -10,7 +10,13 @@ from Cryptodome.Cipher import AES, ChaCha20_Poly1305
 from Cryptodome.Util.Padding import unpad
 
 from fibcrypt.fib import fibonacci_mod
-from fibcrypt.kdf import DEFAULT_PRIME, MIN_PEPPER_BYTES, derive_key
+from fibcrypt.kdf import (
+    DEFAULT_PRIME,
+    MIN_PEPPER_BYTES,
+    _derive_legacy_fc3_key,
+    _validate_kdf_parameters,
+    derive_key,
+)
 from fibcrypt.utils import hash_to_int
 
 logger = logging.getLogger(__name__)
@@ -28,6 +34,7 @@ _SEQUENCE_SIZE = 8
 _CHACHA_NONCE_SIZE = 12
 _CHACHA_VERSION = b"FC5"
 _CHACHA_REPLAY_VERSION = b"FC6"
+_KEY_CACHE_SIZE = 128
 
 
 class CipherMode(Enum):
@@ -36,8 +43,9 @@ class CipherMode(Enum):
 
 
 def int_to_bytes(val: int, length: int) -> bytes:
-    mask = (1 << (length * 8)) - 1
-    return (val & mask).to_bytes(length, byteorder="big")
+    if val < 0 or val >= 1 << (length * 8):
+        raise ValueError("integer does not fit in requested byte length")
+    return val.to_bytes(length, byteorder="big")
 
 
 def _derive_encryption_key(
@@ -51,6 +59,21 @@ def _derive_encryption_key(
     derivation_salt = f"{salt}:{random_salt.hex()}:encryption"
     return int_to_bytes(
         derive_key(password, derivation_salt, pepper, iterations, prime), 32
+    )
+
+
+def _derive_legacy_fc3_encryption_key(
+    password: str,
+    salt: str,
+    pepper: str,
+    random_salt: bytes,
+    iterations: int,
+    prime: int,
+) -> bytes:
+    derivation_salt = f"{salt}:{random_salt.hex()}:encryption"
+    return int_to_bytes(
+        _derive_legacy_fc3_key(password, derivation_salt, pepper, iterations, prime),
+        32,
     )
 
 
@@ -78,6 +101,11 @@ def _derive_legacy_keys(
 def _validate_pepper(pepper: str) -> None:
     if len(pepper.encode("utf-8")) < MIN_PEPPER_BYTES:
         raise ValueError(f"pepper must be at least {MIN_PEPPER_BYTES} bytes")
+
+
+def _validate_cipher_mode(cipher_mode: CipherMode) -> None:
+    if not isinstance(cipher_mode, CipherMode):
+        raise ValueError("cipher_mode must be a CipherMode value")
 
 
 class ReplayGuard:
@@ -181,6 +209,22 @@ def _encrypt_chacha20(
     return header + encrypted + tag
 
 
+def _decrypt_aes_gcm_payload(
+    key: bytes,
+    nonce: bytes,
+    header: bytes,
+    encrypted: bytes,
+    tag: bytes,
+    aad: bytes,
+) -> bytes:
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
+    cipher.update(header + aad)
+    try:
+        return cipher.decrypt_and_verify(encrypted, tag)
+    except ValueError as exc:
+        raise ValueError("Ciphertext authentication failed") from exc
+
+
 def _decrypt_aes_gcm(
     ciphertext: bytes,
     password: str,
@@ -191,6 +235,7 @@ def _decrypt_aes_gcm(
     *,
     aad: bytes = b"",
     replay_guard: Optional[ReplayGuard] = None,
+    encryption_key: Optional[bytes] = None,
 ) -> str:
     version = ciphertext[:3]
     if version == _REPLAY_VERSION:
@@ -207,13 +252,21 @@ def _decrypt_aes_gcm(
         header = ciphertext[:nonce_end]
         encrypted = ciphertext[nonce_end:-_TAG_SIZE]
         tag = ciphertext[-_TAG_SIZE:]
-        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
-        cipher.update(header + aad)
+        key = encryption_key or _derive_encryption_key(
+            password, salt, pepper, random_salt, iterations, prime
+        )
         try:
-            plaintext = cipher.decrypt_and_verify(encrypted, tag)
-        except ValueError as exc:
-            raise ValueError("Ciphertext authentication failed") from exc
+            plaintext = _decrypt_aes_gcm_payload(key, nonce, header, encrypted, tag, aad)
+        except ValueError as current_exc:
+            try:
+                legacy_key = _derive_legacy_fc3_encryption_key(
+                    password, salt, pepper, random_salt, iterations, prime
+                )
+                plaintext = _decrypt_aes_gcm_payload(
+                    legacy_key, nonce, header, encrypted, tag, aad
+                )
+            except ValueError:
+                raise current_exc
         if replay_guard is not None and not replay_guard.accept(sequence_number):
             raise ValueError("Replay detected or sequence number outside replay window")
         return plaintext.decode("utf-8")
@@ -229,13 +282,21 @@ def _decrypt_aes_gcm(
         header = ciphertext[:nonce_end]
         encrypted = ciphertext[nonce_end:-_TAG_SIZE]
         tag = ciphertext[-_TAG_SIZE:]
-        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
-        cipher.update(header + aad)
+        key = encryption_key or _derive_encryption_key(
+            password, salt, pepper, random_salt, iterations, prime
+        )
         try:
-            plaintext = cipher.decrypt_and_verify(encrypted, tag)
-        except ValueError as exc:
-            raise ValueError("Ciphertext authentication failed") from exc
+            plaintext = _decrypt_aes_gcm_payload(key, nonce, header, encrypted, tag, aad)
+        except ValueError as current_exc:
+            try:
+                legacy_key = _derive_legacy_fc3_encryption_key(
+                    password, salt, pepper, random_salt, iterations, prime
+                )
+                plaintext = _decrypt_aes_gcm_payload(
+                    legacy_key, nonce, header, encrypted, tag, aad
+                )
+            except ValueError:
+                raise current_exc
         return plaintext.decode("utf-8")
 
 
@@ -249,6 +310,7 @@ def _decrypt_chacha20(
     *,
     aad: bytes = b"",
     replay_guard: Optional[ReplayGuard] = None,
+    encryption_key: Optional[bytes] = None,
 ) -> str:
     version = ciphertext[:3]
     if version == _CHACHA_REPLAY_VERSION:
@@ -268,7 +330,9 @@ def _decrypt_chacha20(
         header = ciphertext[:nonce_end]
         encrypted = ciphertext[nonce_end:-_TAG_SIZE]
         tag = ciphertext[-_TAG_SIZE:]
-        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        key = encryption_key or _derive_encryption_key(
+            password, salt, pepper, random_salt, iterations, prime
+        )
         cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
         cipher.update(header + aad)
         try:
@@ -290,7 +354,9 @@ def _decrypt_chacha20(
         header = ciphertext[:nonce_end]
         encrypted = ciphertext[nonce_end:-_TAG_SIZE]
         tag = ciphertext[-_TAG_SIZE:]
-        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        key = encryption_key or _derive_encryption_key(
+            password, salt, pepper, random_salt, iterations, prime
+        )
         cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
         cipher.update(header + aad)
         try:
@@ -330,7 +396,7 @@ def _decrypt_legacy(
 
 
 class CryptoContext:
-    """Configured encryption context with optional replay protection and key caching."""
+    """Configured encryption context with replay protection and bounded key caching."""
 
     def __init__(
         self,
@@ -345,6 +411,8 @@ class CryptoContext:
         cipher_mode: CipherMode = CipherMode.AES_GCM,
     ) -> None:
         _validate_pepper(pepper)
+        _validate_kdf_parameters(iterations, prime)
+        _validate_cipher_mode(cipher_mode)
         self.password = password
         self.salt = salt
         self.pepper = pepper
@@ -367,29 +435,45 @@ class CryptoContext:
             self.prime,
         )
         with self._cache_lock:
-            if cache_key not in self._key_cache:
-                derivation_salt = f"{self.salt}:{random_salt.hex()}:{domain}"
-                self._key_cache[cache_key] = int_to_bytes(
-                    derive_key(
-                        self.password,
-                        derivation_salt,
-                        self.pepper,
-                        self.iterations,
-                        self.prime,
-                    ),
-                    32,
-                )
-            return self._key_cache[cache_key]
+            cached_key = self._key_cache.pop(cache_key, None)
+            if cached_key is not None:
+                self._key_cache[cache_key] = cached_key
+                return cached_key
+            derivation_salt = f"{self.salt}:{random_salt.hex()}:{domain}"
+            cached_key = int_to_bytes(
+                derive_key(
+                    self.password,
+                    derivation_salt,
+                    self.pepper,
+                    self.iterations,
+                    self.prime,
+                ),
+                32,
+            )
+            self._key_cache[cache_key] = cached_key
+            if len(self._key_cache) > _KEY_CACHE_SIZE:
+                oldest_key = next(iter(self._key_cache))
+                del self._key_cache[oldest_key]
+            return cached_key
 
-    def _encrypt_with_cached_key(
+    def _cached_key_for_ciphertext(
+        self, ciphertext: bytes, version: bytes
+    ) -> Optional[bytes]:
+        salt_start = len(version)
+        if version in (_REPLAY_VERSION, _CHACHA_REPLAY_VERSION):
+            salt_start += _SEQUENCE_SIZE
+        salt_end = salt_start + _SALT_SIZE
+        if len(ciphertext) < salt_end:
+            return None
+        return self._get_cached_key(ciphertext[salt_start:salt_end])
+
+    def _encrypt(
         self,
         plaintext: str,
         *,
         sequence_number: Optional[int] = None,
         aad: bytes = b"",
     ) -> bytes:
-        random_salt = os.urandom(_SALT_SIZE)
-        _ = self._get_cached_key(random_salt)
         if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
             return _encrypt_chacha20(
                 plaintext,
@@ -398,33 +482,41 @@ class CryptoContext:
                 self.pepper,
                 self.iterations,
                 self.prime,
-                random_salt=random_salt,
                 version=_CHACHA_REPLAY_VERSION if self.replay_protection else _CHACHA_VERSION,
                 sequence_number=sequence_number,
                 aad=aad,
             )
-        else:
-            return _encrypt_aes_gcm(
-                plaintext,
-                self.password,
-                self.salt,
-                self.pepper,
-                self.iterations,
-                self.prime,
-                random_salt=random_salt,
-                version=_REPLAY_VERSION if self.replay_protection else _VERSION,
-                sequence_number=sequence_number,
-                aad=aad,
-            )
+        return _encrypt_aes_gcm(
+            plaintext,
+            self.password,
+            self.salt,
+            self.pepper,
+            self.iterations,
+            self.prime,
+            version=_REPLAY_VERSION if self.replay_protection else _VERSION,
+            sequence_number=sequence_number,
+            aad=aad,
+        )
 
-    def _decrypt_with_cached_key(
+    def _decrypt(
         self,
         ciphertext: bytes,
         *,
         aad: bytes = b"",
     ) -> str:
         version = ciphertext[:3]
-        if version in (_REPLAY_VERSION, _VERSION):
+        if version == _LEGACY_VERSION:
+            if self.replay_protection:
+                raise ValueError("Replay protection requires an FC4 or FC6 ciphertext")
+            return _decrypt_legacy(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+            )
+        if version == _REPLAY_VERSION:
             return _decrypt_aes_gcm(
                 ciphertext,
                 self.password,
@@ -434,8 +526,22 @@ class CryptoContext:
                 self.prime,
                 aad=aad,
                 replay_guard=self.replay_guard,
+                encryption_key=self._cached_key_for_ciphertext(ciphertext, version),
             )
-        elif version in (_CHACHA_REPLAY_VERSION, _CHACHA_VERSION):
+        if version == _VERSION:
+            if self.replay_protection:
+                raise ValueError("Replay protection requires an FC4 or FC6 ciphertext")
+            return _decrypt_aes_gcm(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+                aad=aad,
+                encryption_key=self._cached_key_for_ciphertext(ciphertext, version),
+            )
+        if version == _CHACHA_REPLAY_VERSION:
             return _decrypt_chacha20(
                 ciphertext,
                 self.password,
@@ -445,16 +551,22 @@ class CryptoContext:
                 self.prime,
                 aad=aad,
                 replay_guard=self.replay_guard,
+                encryption_key=self._cached_key_for_ciphertext(ciphertext, version),
             )
-        else:
-            return _decrypt_legacy(
+        if version == _CHACHA_VERSION:
+            if self.replay_protection:
+                raise ValueError("Replay protection requires an FC4 or FC6 ciphertext")
+            return _decrypt_chacha20(
                 ciphertext,
                 self.password,
                 self.salt,
                 self.pepper,
                 self.iterations,
                 self.prime,
+                aad=aad,
+                encryption_key=self._cached_key_for_ciphertext(ciphertext, version),
             )
+        raise ValueError("Unsupported or malformed ciphertext")
 
     def encrypt(
         self,
@@ -464,15 +576,13 @@ class CryptoContext:
         aad: bytes = b"",
     ) -> bytes:
         if not self.replay_protection:
-            return self._encrypt_with_cached_key(plaintext, aad=aad)
-        return self._encrypt_with_cached_key(
-            plaintext,
-            sequence_number=_require_sequence_number(sequence_number),
-            aad=aad,
+            return self._encrypt(plaintext, aad=aad)
+        return self._encrypt(
+            plaintext, sequence_number=_require_sequence_number(sequence_number), aad=aad
         )
 
     def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
-        return self._decrypt_with_cached_key(ciphertext, aad=aad)
+        return self._decrypt(ciphertext, aad=aad)
 
     def clear_cache(self) -> None:
         """Clear the derived key cache."""
@@ -491,6 +601,8 @@ def encrypt(
 ) -> bytes:
     """Encrypt plaintext with AES-GCM or ChaCha20-Poly1305 and authenticate it in one operation."""
     _validate_pepper(pepper)
+    _validate_kdf_parameters(iterations, prime)
+    _validate_cipher_mode(cipher_mode)
     if cipher_mode == CipherMode.CHACHA20_POLY1305:
         return _encrypt_chacha20(
             plaintext, password, salt, pepper, iterations, prime
@@ -510,6 +622,7 @@ def decrypt(
 ) -> str:
     """Authenticate and decrypt an FC3/FC5 AES-GCM/ChaCha20 or legacy FC2 payload."""
     _validate_pepper(pepper)
+    _validate_kdf_parameters(iterations, prime)
     version = ciphertext[:3]
     if version == _LEGACY_VERSION:
         return _decrypt_legacy(ciphertext, password, salt, pepper, iterations, prime)

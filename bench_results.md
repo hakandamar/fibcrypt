@@ -196,3 +196,25 @@
 | `derive_key` | 1.707 ms | 1.694 ms | 1.655 ms | 1.801 ms |
 | `encrypt` | 1.651 ms | 1.657 ms | 1.581 ms | 1.724 ms |
 | `decrypt` | 1.624 ms | 1.610 ms | 1.550 ms | 1.678 ms |
+
+## v1.1.2
+
+- Date: 2026-08-22
+- Change: Restored pre-HKDF v1.1.0 FC3/FC4 migration, enforced replay-protected context input, and replaced the unbounded ineffective cache with a bounded repeated-decryption cache.
+- Python: 3.14
+- Platform: macOS, Apple Silicon
+- Acceleration: `gmpy2` enabled
+- Configuration: default `iterations=128`, 256-bit `prime`, seven samples after one warmup
+
+| Operation | Input | Mean | Median | Min | Max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `encrypt` | 16 B AES-GCM | 16.618 ms | 16.582 ms | 16.444 ms | 16.827 ms |
+| `decrypt` | 16 B AES-GCM | 16.693 ms | 16.693 ms | 16.640 ms | 16.750 ms |
+| `encrypt` | 1 KiB AES-GCM | 16.518 ms | 16.605 ms | 16.202 ms | 16.655 ms |
+| `decrypt` | 1 KiB AES-GCM | 16.562 ms | 16.572 ms | 16.493 ms | 16.608 ms |
+| `encrypt` | 1 MiB AES-GCM | 22.765 ms | 22.790 ms | 22.546 ms | 22.890 ms |
+| `decrypt` | 1 MiB AES-GCM | 22.975 ms | 22.982 ms | 22.908 ms | 23.048 ms |
+| `encrypt` | 16 B ChaCha20-Poly1305 | 16.547 ms | 16.551 ms | 16.469 ms | 16.637 ms |
+| `decrypt` | 16 B ChaCha20-Poly1305 | 16.646 ms | 16.652 ms | 16.597 ms | 16.674 ms |
+
+Repeated decryption of the same 16-byte payload through `CryptoContext` measured approximately `0.034 ms` after the first cached derivation, with one cache entry retained. The cache is bounded at 128 entries.

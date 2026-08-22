@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="fibcrypt",
-    version="1.1.1",
+    version="1.1.2",
     description="A fast Fibonacci-based cryptographic toolkit",
     long_description=long_description,
     long_description_content_type="text/markdown",

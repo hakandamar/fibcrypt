@@ -4,6 +4,7 @@ import logging
 import struct
 
 from fibcrypt.fib import fibonacci_mod
+from fibcrypt.utils import hash_to_int
 
 DEFAULT_PRIME = 2**256 - 2**32 - 977
 MIN_PEPPER_BYTES = 32
@@ -54,6 +55,29 @@ def _derive_seed(password: str, salt: str, pepper: str) -> int:
     return int.from_bytes(okm, byteorder="big")
 
 
+def _derive_legacy_fc3_key(
+    password: str,
+    salt: str,
+    pepper: str,
+    iterations: int = 128,
+    prime: int = DEFAULT_PRIME,
+) -> int:
+    """Derive the pre-HKDF key used by v1.1.0 FC3 and FC4 payloads."""
+    _validate_kdf_parameters(iterations, prime)
+    seed = hash_to_int(_encode_fields("fibcrypt-kdf-v2", password, salt, pepper))
+    key = 0
+    for i in range(iterations):
+        key ^= fibonacci_mod(seed + i, prime)
+    return key
+
+
+def _validate_kdf_parameters(iterations: int, prime: int) -> None:
+    if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
+        raise ValueError("iterations must be a positive integer")
+    if not isinstance(prime, int) or isinstance(prime, bool) or prime <= 1:
+        raise ValueError("prime must be an integer greater than 1")
+
+
 def derive_key(
     password: str,
     salt: str,
@@ -67,6 +91,7 @@ def derive_key(
     You may increase this value (e.g. 1000) in production for higher entropy,
     especially on faster machines.
     """
+    _validate_kdf_parameters(iterations, prime)
     seed = _derive_seed(password, salt, pepper)
     key = 0
     for i in range(iterations):
