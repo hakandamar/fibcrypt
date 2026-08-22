@@ -2,27 +2,27 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/fibcrypt.svg)](https://pypi.org/project/fibcrypt/)
 [![Python versions](https://img.shields.io/pypi/pyversions/fibcrypt.svg)](https://pypi.org/project/fibcrypt/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/fibcrypt?period=total&units=INTERNATIONAL_SYSTEM&left_color=RED&right_color=BLUE&left_text=Downloads)](https://pepy.tech/projects/fibcrypt)
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-`fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design with authenticated encryption.
+`fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
+with authenticated encryption.
 
-It is designed for applications that need many low-latency encryption/decryption operations and want to evaluate an alternative, transparent cryptographic construction. It is **experimental cryptographic software**, not a replacement for Argon2, scrypt, or other independently reviewed password KDFs.
+It is designed for applications that need many low-latency encryption/decryption operations and want to evaluate an
+alternative, transparent cryptographic construction. It is **experimental cryptographic software**, not a replacement
+for Argon2, scrypt, or other independently reviewed password KDFs.
 
 ## Project Status
 
-The project is maintained as an experimental, independently unaudited
-cryptographic toolkit. The public API and wire formats may evolve between
-minor releases. Review the [security policy](SECURITY.md) before using the
-package in a production or regulated environment.
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+The project is maintained as an experimental, independently unaudited cryptographic toolkit. The public API and wire
+formats may evolve between minor releases. Review the [security policy](SECURITY.md) before using the package in a
+production or regulated environment. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Articles
 
-- [Part 2 (2026): fibcrypt v1.0 Stable - Authenticated Fibonacci-Based
-  Encryption for Edge Workloads](https://hakandamar.com/fibcrypt-v1-0-stable-authenticated-fibonacci-based-encryption-for-edge-workloads-41cb9650512e)
-- [Part 1 (2025): A Lightweight Cryptographic Toolkit Based on Fibonacci Matrix
-  Exponentiation](https://hakandamar.com/a-lightweight-cryptographic-toolkit-based-on-fibonacci-matrix-exponentiation-fibcrypt-484a9cf0a0a1)
+- [Part 2 (2026): fibcrypt v1.0 Stable - Authenticated Fibonacci-Based Encryption for Edge Workloads](https://hakandamar.com/fibcrypt-v1-0-stable-authenticated-fibonacci-based-encryption-for-edge-workloads-41cb9650512e)
+- [Part 1 (2025): A Lightweight Cryptographic Toolkit Based on Fibonacci Matrix Exponentiation](https://hakandamar.com/a-lightweight-cryptographic-toolkit-based-on-fibonacci-matrix-exponentiation-fibcrypt-484a9cf0a0a1)
 
 ## What It Provides
 
@@ -49,7 +49,8 @@ Each encryption requires four inputs:
 - `salt`: caller-provided context; it may be public, but must be supplied again for decryption
 - `pepper`: a secret deployment value that must not be stored in the ciphertext or source code
 
-The pepper must contain at least 32 UTF-8 bytes. This is a minimum deployment-secret requirement, not a substitute for choosing a strong password.
+The pepper must contain at least 32 UTF-8 bytes. This is a minimum deployment-secret requirement, not a substitute for
+choosing a strong password.
 
 The ciphertext contains the version marker, random salt, nonce, encrypted data, and authentication tag:
 
@@ -72,15 +73,16 @@ FC4/FC6 + sequence_number + random_salt + nonce + ciphertext + tag
 FC7/FC8 + session_id + sequence_number + ciphertext + tag
 ```
 
-The high-performance nonce is derived from the session sequence number and is
-not stored separately in the payload. The session key is derived once per
-session instead of once per message.
+The high-performance nonce is derived from the session sequence number and is not stored separately in the payload. The
+session key is derived once per session instead of once per message.
 
-Decryption authenticates the tag before returning plaintext. Modified or truncated ciphertexts, wrong passwords, wrong salts, and wrong peppers are rejected.
+Decryption authenticates the tag before returning plaintext. Modified or truncated ciphertexts, wrong passwords, wrong
+salts, and wrong peppers are rejected.
 
 ### Optional Replay Protection
 
-Replay protection is disabled by default, so the existing `encrypt()` and `decrypt()` API continues to use the stateless `FC3` format. Applications that process ordered control or telemetry messages can opt in through `CryptoContext`:
+Replay protection is disabled by default, so the existing `encrypt()` and `decrypt()` API continues to use the stateless
+`FC3` format. Applications that process ordered control or telemetry messages can opt in through `CryptoContext`:
 
 ```python
 from fibcrypt.crypto_utils import CryptoContext
@@ -92,15 +94,18 @@ ciphertext = sender.encrypt(message, sequence_number=42, aad=b"device-7/telemetr
 plaintext = receiver.decrypt(ciphertext, aad=b"device-7/telemetry")
 ```
 
-When enabled, `sequence_number` is required and new payloads use the `FC4` (AES-GCM) or `FC6` (ChaCha20) format. The sequence number is authenticated by the AEAD cipher and the receiver uses a thread-safe sliding replay window. Duplicate or sufficiently old sequence numbers are rejected. `aad` can bind a message to a device, channel, or message type, but must be supplied identically during decryption.
+When enabled, `sequence_number` is required and new payloads use the `FC4` (AES-GCM) or `FC6` (ChaCha20) format. The
+sequence number is authenticated by the AEAD cipher and the receiver uses a thread-safe sliding replay window. Duplicate
+or sufficiently old sequence numbers are rejected. `aad` can bind a message to a device, channel, or message type, but
+must be supplied identically during decryption.
 
-The in-process replay window does not coordinate multiple application instances. Distributed deployments must provide shared atomic replay state at the application or infrastructure layer.
+The in-process replay window does not coordinate multiple application instances. Distributed deployments must provide
+shared atomic replay state at the application or infrastructure layer.
 
 ### Opt-In High-Performance Session Mode
 
-`high_performance=True` is disabled by default. It changes the `CryptoContext`
-payload format to `FC7` for AES-GCM or `FC8` for ChaCha20-Poly1305 and derives
-the Fibonacci session key once instead of deriving a key for every message:
+`high_performance=True` is disabled by default. It changes the `CryptoContext` payload format to `FC7` for AES-GCM or
+`FC8` for ChaCha20-Poly1305 and derives the Fibonacci session key once instead of deriving a key for every message:
 
 ```python
 import os
@@ -131,23 +136,25 @@ ciphertext = sender.encrypt(message, sequence_number=1, aad=b"base-station")
 plaintext = receiver.decrypt(ciphertext, aad=b"base-station")
 ```
 
-`sequence_number` is required in high-performance mode even when replay
-protection is disabled because it provides the per-message AEAD nonce. A
-sequence number must never be reused with the same session ID and direction.
-Use distinct session IDs or directions for uplink and downlink traffic. The
-`session_id` must be explicitly shared with both endpoints; this prevents an
-attacker from forcing a receiver to derive unbounded numbers of session keys.
-High-performance contexts reject the default `FC3`/`FC5` and replay `FC4`/`FC6`
-payloads so that a deployment cannot silently fall back to per-message KDF.
+`sequence_number` is required in high-performance mode even when replay protection is disabled because it provides the
+per-message AEAD nonce. A sequence number must never be reused with the same session ID and direction. Use distinct
+session IDs or directions for uplink and downlink traffic. The `session_id` must be explicitly shared with both
+endpoints; this prevents an attacker from forcing a receiver to derive unbounded numbers of session keys.
+High-performance contexts reject the default `FC3`/`FC5` and replay `FC4`/`FC6` payloads so that a deployment cannot
+silently fall back to per-message KDF.
 
-For a ciphertext-only attacker who has no password, caller salt, or pepper, the payload and public source code are not sufficient to derive the keys. This assumes the deployment pepper is a high-entropy secret and is not embedded in application source, test configuration, logs, or the payload.
+For a ciphertext-only attacker who has no password, caller salt, or pepper, the payload and public source code are not
+sufficient to derive the keys. This assumes the deployment pepper is a high-entropy secret and is not embedded in
+application source, test configuration, logs, or the payload.
 
 Important limitations:
 
 - The Fibonacci KDF is custom and has not received an independent cryptographic audit.
 - `iterations=128` is selected for latency, not as a claim of equivalence to a memory-hard password KDF.
-- Weak or reused passwords remain vulnerable to dictionary attacks if the attacker also knows or can guess the salt and obtains the pepper.
-- The pepper must be managed as a deployment secret and contain at least 32 bytes. If an attacker compromises the application host and reads its secrets, this model no longer applies.
+- Weak or reused passwords remain vulnerable to dictionary attacks if the attacker also knows or can guess the salt and
+  obtains the pepper.
+- The pepper must be managed as a deployment secret and contain at least 32 bytes. If an attacker compromises the
+  application host and reads its secrets, this model no longer applies.
 - Do not use this package for high-assurance or regulated cryptographic requirements without an independent review.
 
 ## Installation
@@ -190,7 +197,8 @@ plaintext = decrypt(ciphertext, password, salt, pepper)
 print("Decrypted:", plaintext)
 ```
 
-`encrypt` returns `bytes`. Store or transmit those bytes directly, or encode them as hexadecimal/base64. Keep the `salt` and `pepper` available to the decrypting service; only the pepper must remain secret.
+`encrypt` returns `bytes`. Store or transmit those bytes directly, or encode them as hexadecimal/base64. Keep the `salt`
+and `pepper` available to the decrypting service; only the pepper must remain secret.
 
 Wrong credentials and tampered ciphertext raise `ValueError` during authentication.
 
@@ -230,7 +238,9 @@ The default public API uses:
 - `cipher_mode=CipherMode.AES_GCM`
 - `CryptoContext.high_performance=False`
 
-Both `iterations` and `prime` can be overridden explicitly for experiments and benchmarks. `iterations` must be positive and `prime` must be greater than one. Changing these values changes the derived keys, so the parameters must remain consistent between encryption and decryption.
+Both `iterations` and `prime` can be overridden explicitly for experiments and benchmarks. `iterations` must be positive
+and `prime` must be greater than one. Changing these values changes the derived keys, so the parameters must remain
+consistent between encryption and decryption.
 
 ## Performance
 
@@ -245,18 +255,21 @@ On the development benchmark machine (Python 3.14, Apple Silicon), the release c
 | 1 MiB | Encrypt | 73.4 ms | 39.335 ms | 22.765 ms |
 | 1 MiB | Decrypt | 72.8 ms | 39.811 ms | 22.975 ms |
 
-All measurements use the default `iterations=128` and 256-bit prime, with seven samples after one warmup. The v1.0.0 values are rounded values recorded in the v1.0.0 distribution metadata; v1.1.2 values were measured on the same Python 3.14/Apple Silicon environment. The v1.1.2 pure-Python column disables gmpy2, while the final column has gmpy2 enabled.
+All measurements use the default `iterations=128` and 256-bit prime, with seven samples after one warmup. The v1.0.0
+values are rounded values recorded in the v1.0.0 distribution metadata; v1.1.2 values were measured on the same Python
+3.14/Apple Silicon environment. The v1.1.2 pure-Python column disables gmpy2, while the final column has gmpy2 enabled.
 
-The comparison is performance-oriented, not a wire-format comparison: v1.0.0 uses authenticated `FC2` AES-CBC/HMAC, while v1.1.2 uses authenticated `FC3` AES-GCM. Relative to v1.0.0, v1.1.2 is approximately 1.8-2.1x faster without gmpy2 and 3.2-4.2x faster with gmpy2.
+The comparison is performance-oriented, not a wire-format comparison: v1.0.0 uses authenticated `FC2` AES-CBC/HMAC,
+while v1.1.2 uses authenticated `FC3` AES-GCM. Relative to v1.0.0, v1.1.2 is approximately 1.8-2.1x faster without gmpy2
+and 3.2-4.2x faster with gmpy2.
 
 These are reference measurements, not performance guarantees. Benchmark the target edge hardware before deployment.
 
 ### v1.1.2 vs v1.2.0 High-Performance Session Benchmark
 
-With gmpy2 enabled, explicit session ID, and replay protection, v1.2.0's
-`CryptoContext(high_performance=True)` derives the Fibonacci session key once
-per endpoint. Session setup cost was approximately `16.6 ms` per endpoint.
-Subsequent messages use the session key:
+With gmpy2 enabled, explicit session ID, and replay protection, v1.2.0's `CryptoContext(high_performance=True)` derives
+the Fibonacci session key once per endpoint. Session setup cost was approximately `16.6 ms` per endpoint. Subsequent
+messages use the session key:
 
 | Cipher | Payload | v1.1.2 Encrypt | v1.2.0 Encrypt | Encrypt speedup | v1.1.2 Decrypt | v1.2.0 Decrypt | Decrypt speedup |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -269,7 +282,10 @@ Subsequent messages use the session key:
 
 ### PyPI 0.1.5 vs v1.1.2
 
-The following comparison was run on the same machine against the published PyPI `0.1.5` wheel and the v1.1.2 implementation. The legacy release used its original `iterations=20` default and unauthenticated AES-CBC format; v1.1.2 uses `iterations=128`, full-seed derivation, a secret pepper, random salt, and authenticated encryption. This is therefore a release comparison, not an equal-security-configuration comparison.
+The following comparison was run on the same machine against the published PyPI `0.1.5` wheel and the v1.1.2
+implementation. The legacy release used its original `iterations=20` default and unauthenticated AES-CBC format; v1.1.2
+uses `iterations=128`, full-seed derivation, a secret pepper, random salt, and authenticated encryption. This is
+therefore a release comparison, not an equal-security-configuration comparison.
 
 | Payload | 0.1.5 Encrypt | v1.1.2 Encrypt | Speedup | 0.1.5 Decrypt | v1.1.2 Decrypt | Speedup |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -277,7 +293,8 @@ The following comparison was run on the same machine against the published PyPI 
 | 1 KiB | 3471 ms | 16.8 ms | 206x | 3497 ms | 16.9 ms | 207x |
 | 1 MiB | 3524 ms | 20.2 ms | 174x | 3507 ms | 19.8 ms | 177x |
 
-The legacy values used three timed samples after one warmup; v1.1.2 values used seven timed samples after one warmup. Values are rounded and will vary by hardware.
+The legacy values used three timed samples after one warmup; v1.1.2 values used seven timed samples after one warmup.
+Values are rounded and will vary by hardware.
 
 ## Security Improvements
 
@@ -301,7 +318,8 @@ Compared with the original PyPI `fibcrypt 0.1.5` release, `fibcrypt 1.2.0` inclu
 
 ## Statistical Testing
 
-An exploratory run of selected NIST SP 800-22 tests was performed against one 1,000,000-bit stream generated from the current KDF using the default `iterations=128` and 256-bit prime:
+An exploratory run of selected NIST SP 800-22 tests was performed against one 1,000,000-bit stream generated from the
+current KDF using the default `iterations=128` and 256-bit prime:
 
 | Test | p-value |
 | --- | ---: |
@@ -313,25 +331,48 @@ An exploratory run of selected NIST SP 800-22 tests was performed against one 1,
 | Approximate Entropy | 0.141916 |
 | Cumulative Sums | 0.344659 |
 
-All observed p-values exceeded the exploratory threshold of `0.01`. These results indicate no obvious statistical anomaly in this sample. They do not prove cryptographic randomness, establish KDF security, or replace the full NIST Statistical Test Suite, multiple independent sequences, or an independent cryptographic audit. The reproducible, dependency-free harness is available at `scripts/nist_sp800_22.py`.
+All observed p-values exceeded the exploratory threshold of `0.01`. These results indicate no obvious statistical
+anomaly in this sample. They do not prove cryptographic randomness, establish KDF security, or replace the full NIST
+Statistical Test Suite, multiple independent sequences, or an independent cryptographic audit. The reproducible,
+dependency-free harness is available at `scripts/nist_sp800_22.py`.
+
+For a broader implementation-level review of the Fibonacci KDF, see [`CRYPTO_KDF_ANALYSIS.md`](CRYPTO_KDF_ANALYSIS.md).
+It records related-output identities, small-prime collision experiments, default-modulus output checks, HKDF
+related-input tests, known-pepper timing measurements, and a complete public format matrix covering `FC3` through `FC8`
+across AES-GCM, ChaCha20-Poly1305, replay protection, and high-performance session mode. The matrix is also verified
+against the built package wheel. Reproduce it with:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/crypto_analysis.py
+```
+
+The report is exploratory and does not establish cryptographic security or replace an independent audit.
 
 ## Upgrading From 0.1.5
 
-Version 1.2.0 changes neither the current `FC3`/`FC4` wire format nor the v1.1.1 KDF for default payloads. It also restores decryption of pre-HKDF v1.1.0 `FC3`/`FC4` payloads and adds opt-in `FC7`/`FC8` session mode:
+Version 1.2.0 changes neither the current `FC3`/`FC4` wire format nor the v1.1.1 KDF for default payloads. It also
+restores decryption of pre-HKDF v1.1.0 `FC3`/`FC4` payloads and adds opt-in `FC7`/`FC8` session mode:
 
-1. Provision one high-entropy pepper through a secret manager or environment variable and make it available to every service that encrypts or decrypts the shared data.
-2. Update calls from `encrypt(plaintext, password, salt)` and `decrypt(ciphertext, password, salt)` to include the same pepper value.
+1. Provision one high-entropy pepper through a secret manager or environment variable and make it available to every
+   service that encrypts or decrypts the shared data.
+2. Update calls from `encrypt(plaintext, password, salt)` and `decrypt(ciphertext, password, salt)` to include the same
+   pepper value.
 3. Keep the original `0.1.5` runtime available while migrating existing data.
-4. Decrypt each `0.1.5` ciphertext with the original package and credentials, then re-encrypt it with v1.2.0 and the managed pepper.
+4. Decrypt each `0.1.5` ciphertext with the original package and credentials, then re-encrypt it with v1.2.0 and the
+   managed pepper.
 5. Verify the migrated plaintext or application record before replacing the old ciphertext.
 6. Test the migration on a backup or staging copy before rolling it out to production.
 
-The v0.1.5 format was `iv + ciphertext` and used different key derivation defaults. It has no authentication tag and is not readable by the `FC2`/`FC3`/`FC4`/`FC5`/`FC6`/`FC7`/`FC8` decoder. Existing authenticated `FC2` payloads remain decryptable, while new default calls produce `FC3` AES-GCM payloads. Replay-protected calls produce `FC4` payloads. ChaCha20 calls produce `FC5`/`FC6`. High-performance session calls produce `FC7`/`FC8`. A replay-protected `CryptoContext` requires `FC4` or `FC6` input and rejects stateless payloads. Losing the pepper makes ciphertexts unrecoverable.
+The v0.1.5 format was `iv + ciphertext` and used different key derivation defaults. It has no authentication tag and is
+not readable by the `FC2`/`FC3`/`FC4`/`FC5`/`FC6`/`FC7`/`FC8` decoder. Existing authenticated `FC2` payloads remain
+decryptable, while new default calls produce `FC3` AES-GCM payloads. Replay-protected calls produce `FC4` payloads.
+ChaCha20 calls produce `FC5`/`FC6`. High-performance session calls produce `FC7`/`FC8`. A replay-protected
+`CryptoContext` requires `FC4` or `FC6` input and rejects stateless payloads. Losing the pepper makes ciphertexts
+unrecoverable.
 
 ## Development
 
-Clone the repository and install the development dependencies in a virtual
-environment:
+Clone the repository and install the development dependencies in a virtual environment:
 
 ```bash
 git clone https://github.com/hakandamar/fibcrypt.git
@@ -352,14 +393,13 @@ PYTHONPATH=. .venv/bin/python test/main.py
 PYTHONPATH=. .venv/bin/python scripts/nist_sp800_22.py
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request and development
-guidelines. Continuous integration runs tests on the supported Python range.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request and development guidelines. Continuous integration runs tests on
+the supported Python range.
 
 ## Security
 
-Report suspected vulnerabilities privately as described in
-[SECURITY.md](SECURITY.md). Do not include real credentials, deployment
-peppers, or customer data in issues, pull requests, or benchmark files.
+Report suspected vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Do not include real credentials,
+deployment peppers, or customer data in issues, pull requests, or benchmark files.
 
 ## License
 

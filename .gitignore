@@ -165,6 +165,7 @@ cython_debug/
 
 # Local development and release credentials
 .pypirc
+crypto_analysis.md
 .env
 .env.*
 !.env.example
