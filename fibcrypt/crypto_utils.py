@@ -34,6 +34,9 @@ _SEQUENCE_SIZE = 8
 _CHACHA_NONCE_SIZE = 12
 _CHACHA_VERSION = b"FC5"
 _CHACHA_REPLAY_VERSION = b"FC6"
+_HIGH_PERFORMANCE_AES_VERSION = b"FC7"
+_HIGH_PERFORMANCE_CHACHA_VERSION = b"FC8"
+_SESSION_ID_SIZE = 16
 _KEY_CACHE_SIZE = 128
 
 
@@ -108,6 +111,18 @@ def _validate_cipher_mode(cipher_mode: CipherMode) -> None:
         raise ValueError("cipher_mode must be a CipherMode value")
 
 
+def _validate_session_id(session_id: Optional[bytes]) -> None:
+    if session_id is not None and (
+        not isinstance(session_id, bytes) or len(session_id) != _SESSION_ID_SIZE
+    ):
+        raise ValueError(f"session_id must be exactly {_SESSION_ID_SIZE} bytes")
+
+
+def _validate_direction(direction: str) -> None:
+    if not isinstance(direction, str) or not direction:
+        raise ValueError("direction must be a non-empty string")
+
+
 class ReplayGuard:
     """Thread-safe sliding-window state for authenticated sequence numbers."""
 
@@ -141,9 +156,11 @@ class ReplayGuard:
             return True
 
 
-def _require_sequence_number(sequence_number: Optional[int]) -> int:
+def _require_sequence_number(
+    sequence_number: Optional[int], feature: str = "replay protection"
+) -> int:
     if sequence_number is None:
-        raise ValueError("sequence_number is required when replay protection is enabled")
+        raise ValueError(f"sequence_number is required when {feature} is enabled")
     if sequence_number < 0 or sequence_number >= 2**64:
         raise ValueError("sequence_number must fit in an unsigned 64-bit integer")
     return sequence_number
@@ -207,6 +224,160 @@ def _encrypt_chacha20(
     cipher.update(header + aad)
     encrypted, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
     return header + encrypted + tag
+
+
+def _session_nonce(sequence_number: int) -> bytes:
+    """Build a 96-bit nonce from a session-unique 64-bit sequence number."""
+    return b"\0" * 4 + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+
+
+def _derive_session_key(
+    password: str,
+    salt: str,
+    pepper: str,
+    session_id: bytes,
+    direction: str,
+    version: bytes,
+    iterations: int,
+    prime: int,
+) -> bytes:
+    direction_hex = direction.encode("utf-8").hex()
+    derivation_salt = (
+        f"{salt}:{session_id.hex()}:session:{direction_hex}:{version.decode('ascii')}"
+    )
+    return int_to_bytes(
+        derive_key(password, derivation_salt, pepper, iterations, prime), 32
+    )
+
+
+def _encrypt_high_performance_aes(
+    plaintext: str,
+    key: bytes,
+    session_id: bytes,
+    sequence_number: int,
+    aad: bytes,
+) -> bytes:
+    header = (
+        _HIGH_PERFORMANCE_AES_VERSION
+        + session_id
+        + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+    )
+    cipher = AES.new(key, AES.MODE_GCM, nonce=_session_nonce(sequence_number), mac_len=_TAG_SIZE)
+    cipher.update(header + aad)
+    encrypted, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+    return header + encrypted + tag
+
+
+def _encrypt_high_performance_chacha20(
+    plaintext: str,
+    key: bytes,
+    session_id: bytes,
+    sequence_number: int,
+    aad: bytes,
+) -> bytes:
+    header = (
+        _HIGH_PERFORMANCE_CHACHA_VERSION
+        + session_id
+        + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+    )
+    cipher = ChaCha20_Poly1305.new(key=key, nonce=_session_nonce(sequence_number))
+    cipher.update(header + aad)
+    encrypted, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+    return header + encrypted + tag
+
+
+def _decrypt_high_performance_aes(
+    ciphertext: bytes,
+    password: str,
+    salt: str,
+    pepper: str,
+    direction: str,
+    iterations: int,
+    prime: int,
+    *,
+    aad: bytes = b"",
+    replay_guard: Optional[ReplayGuard] = None,
+    encryption_key: Optional[bytes] = None,
+) -> str:
+    header_size = 3 + _SESSION_ID_SIZE + _SEQUENCE_SIZE
+    if len(ciphertext) < header_size + _TAG_SIZE or not ciphertext.startswith(
+        _HIGH_PERFORMANCE_AES_VERSION
+    ):
+        raise ValueError("Unsupported or malformed FC7 ciphertext")
+    session_id_start = len(_HIGH_PERFORMANCE_AES_VERSION)
+    session_id_end = session_id_start + _SESSION_ID_SIZE
+    sequence_end = session_id_end + _SEQUENCE_SIZE
+    session_id = ciphertext[session_id_start:session_id_end]
+    sequence_number = int.from_bytes(ciphertext[session_id_end:sequence_end], "big")
+    header = ciphertext[:sequence_end]
+    encrypted = ciphertext[sequence_end:-_TAG_SIZE]
+    tag = ciphertext[-_TAG_SIZE:]
+    key = encryption_key or _derive_session_key(
+        password,
+        salt,
+        pepper,
+        session_id,
+        direction,
+        _HIGH_PERFORMANCE_AES_VERSION,
+        iterations,
+        prime,
+    )
+    cipher = AES.new(key, AES.MODE_GCM, nonce=_session_nonce(sequence_number), mac_len=_TAG_SIZE)
+    cipher.update(header + aad)
+    try:
+        plaintext = cipher.decrypt_and_verify(encrypted, tag)
+    except ValueError as exc:
+        raise ValueError("Ciphertext authentication failed") from exc
+    if replay_guard is not None and not replay_guard.accept(sequence_number):
+        raise ValueError("Replay detected or sequence number outside replay window")
+    return plaintext.decode("utf-8")
+
+
+def _decrypt_high_performance_chacha20(
+    ciphertext: bytes,
+    password: str,
+    salt: str,
+    pepper: str,
+    direction: str,
+    iterations: int,
+    prime: int,
+    *,
+    aad: bytes = b"",
+    replay_guard: Optional[ReplayGuard] = None,
+    encryption_key: Optional[bytes] = None,
+) -> str:
+    header_size = 3 + _SESSION_ID_SIZE + _SEQUENCE_SIZE
+    if len(ciphertext) < header_size + _TAG_SIZE or not ciphertext.startswith(
+        _HIGH_PERFORMANCE_CHACHA_VERSION
+    ):
+        raise ValueError("Unsupported or malformed FC8 ciphertext")
+    session_id_start = len(_HIGH_PERFORMANCE_CHACHA_VERSION)
+    session_id_end = session_id_start + _SESSION_ID_SIZE
+    sequence_end = session_id_end + _SEQUENCE_SIZE
+    session_id = ciphertext[session_id_start:session_id_end]
+    sequence_number = int.from_bytes(ciphertext[session_id_end:sequence_end], "big")
+    header = ciphertext[:sequence_end]
+    encrypted = ciphertext[sequence_end:-_TAG_SIZE]
+    tag = ciphertext[-_TAG_SIZE:]
+    key = encryption_key or _derive_session_key(
+        password,
+        salt,
+        pepper,
+        session_id,
+        direction,
+        _HIGH_PERFORMANCE_CHACHA_VERSION,
+        iterations,
+        prime,
+    )
+    cipher = ChaCha20_Poly1305.new(key=key, nonce=_session_nonce(sequence_number))
+    cipher.update(header + aad)
+    try:
+        plaintext = cipher.decrypt_and_verify(encrypted, tag)
+    except ValueError as exc:
+        raise ValueError("Ciphertext authentication failed") from exc
+    if replay_guard is not None and not replay_guard.accept(sequence_number):
+        raise ValueError("Replay detected or sequence number outside replay window")
+    return plaintext.decode("utf-8")
 
 
 def _decrypt_aes_gcm_payload(
@@ -396,7 +567,7 @@ def _decrypt_legacy(
 
 
 class CryptoContext:
-    """Configured encryption context with replay protection and bounded key caching."""
+    """Configured context with replay protection, bounded caching, and session mode."""
 
     def __init__(
         self,
@@ -409,10 +580,20 @@ class CryptoContext:
         iterations: int = 128,
         prime: int = DEFAULT_PRIME,
         cipher_mode: CipherMode = CipherMode.AES_GCM,
+        high_performance: bool = False,
+        session_id: Optional[bytes] = None,
+        direction: str = "default",
     ) -> None:
         _validate_pepper(pepper)
         _validate_kdf_parameters(iterations, prime)
         _validate_cipher_mode(cipher_mode)
+        _validate_session_id(session_id)
+        if high_performance:
+            _validate_direction(direction)
+            if session_id is None:
+                raise ValueError("session_id is required when high_performance=True")
+        elif session_id is not None:
+            raise ValueError("session_id requires high_performance=True")
         self.password = password
         self.salt = salt
         self.pepper = pepper
@@ -421,15 +602,25 @@ class CryptoContext:
         self.replay_protection = replay_protection
         self.replay_guard = ReplayGuard(replay_window) if replay_protection else None
         self.cipher_mode = cipher_mode
+        self.high_performance = high_performance
+        self.direction = direction
+        self.session_id = session_id
         self._key_cache: "Dict[tuple, bytes]" = {}
         self._cache_lock = threading.Lock()
+        self._session_lock = threading.Lock()
+        self._active_session_id: Optional[bytes] = None
+        self._active_session_version: Optional[bytes] = None
+        self._active_session_key: Optional[bytes] = None
+        if high_performance:
+            assert session_id is not None
+            self._get_session_key(session_id, self._version_for_mode())
 
-    def _get_cached_key(self, random_salt: bytes, domain: str = "encryption") -> bytes:
+    def _get_cached_key(self, key_material: bytes, domain: str = "encryption") -> bytes:
         cache_key = (
             self.password,
             self.salt,
             self.pepper,
-            random_salt,
+            key_material,
             domain,
             self.iterations,
             self.prime,
@@ -439,7 +630,7 @@ class CryptoContext:
             if cached_key is not None:
                 self._key_cache[cache_key] = cached_key
                 return cached_key
-            derivation_salt = f"{self.salt}:{random_salt.hex()}:{domain}"
+            derivation_salt = f"{self.salt}:{key_material.hex()}:{domain}"
             cached_key = int_to_bytes(
                 derive_key(
                     self.password,
@@ -467,6 +658,47 @@ class CryptoContext:
             return None
         return self._get_cached_key(ciphertext[salt_start:salt_end])
 
+    def _version_for_mode(self) -> bytes:
+        if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
+            return _HIGH_PERFORMANCE_CHACHA_VERSION
+        return _HIGH_PERFORMANCE_AES_VERSION
+
+    def _get_session_key(self, session_id: bytes, version: bytes) -> bytes:
+        active_key = self._active_session_key
+        if (
+            self._active_session_id == session_id
+            and self._active_session_version == version
+            and active_key is not None
+        ):
+            return active_key
+        with self._session_lock:
+            active_key = self._active_session_key
+            if (
+                self._active_session_id == session_id
+                and self._active_session_version == version
+                and active_key is not None
+            ):
+                return active_key
+            direction_hex = self.direction.encode("utf-8").hex()
+            domain = f"session:{direction_hex}:{version.decode('ascii')}"
+            active_key = self._get_cached_key(session_id, domain=domain)
+            self._active_session_id = session_id
+            self._active_session_version = version
+            self._active_session_key = active_key
+            return active_key
+
+    def _session_key_for_ciphertext(
+        self, ciphertext: bytes, version: bytes
+    ) -> Optional[bytes]:
+        session_id_start = len(version)
+        session_id_end = session_id_start + _SESSION_ID_SIZE
+        if len(ciphertext) < session_id_end:
+            return None
+        session_id = ciphertext[session_id_start:session_id_end]
+        if self.session_id is None or session_id != self.session_id:
+            raise ValueError("Ciphertext session_id does not match this context")
+        return self._get_session_key(session_id, version)
+
     def _encrypt(
         self,
         plaintext: str,
@@ -474,6 +706,22 @@ class CryptoContext:
         sequence_number: Optional[int] = None,
         aad: bytes = b"",
     ) -> bytes:
+        if self.high_performance:
+            session_id = self.session_id
+            if session_id is None:
+                raise RuntimeError("high-performance session is not initialized")
+            sequence_number = _require_sequence_number(
+                sequence_number, feature="high-performance mode"
+            )
+            version = self._version_for_mode()
+            key = self._get_session_key(session_id, version)
+            if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
+                return _encrypt_high_performance_chacha20(
+                    plaintext, key, session_id, sequence_number, aad
+                )
+            return _encrypt_high_performance_aes(
+                plaintext, key, session_id, sequence_number, aad
+            )
         if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
             return _encrypt_chacha20(
                 plaintext,
@@ -505,6 +753,38 @@ class CryptoContext:
         aad: bytes = b"",
     ) -> str:
         version = ciphertext[:3]
+        if version == _HIGH_PERFORMANCE_AES_VERSION:
+            if not self.high_performance:
+                raise ValueError("FC7 ciphertext requires high_performance=True")
+            return _decrypt_high_performance_aes(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.direction,
+                self.iterations,
+                self.prime,
+                aad=aad,
+                replay_guard=self.replay_guard,
+                encryption_key=self._session_key_for_ciphertext(ciphertext, version),
+            )
+        if version == _HIGH_PERFORMANCE_CHACHA_VERSION:
+            if not self.high_performance:
+                raise ValueError("FC8 ciphertext requires high_performance=True")
+            return _decrypt_high_performance_chacha20(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.direction,
+                self.iterations,
+                self.prime,
+                aad=aad,
+                replay_guard=self.replay_guard,
+                encryption_key=self._session_key_for_ciphertext(ciphertext, version),
+            )
+        if self.high_performance:
+            raise ValueError("High-performance context requires FC7 or FC8 ciphertext")
         if version == _LEGACY_VERSION:
             if self.replay_protection:
                 raise ValueError("Replay protection requires an FC4 or FC6 ciphertext")
@@ -575,11 +855,9 @@ class CryptoContext:
         sequence_number: Optional[int] = None,
         aad: bytes = b"",
     ) -> bytes:
-        if not self.replay_protection:
-            return self._encrypt(plaintext, aad=aad)
-        return self._encrypt(
-            plaintext, sequence_number=_require_sequence_number(sequence_number), aad=aad
-        )
+        if self.replay_protection and not self.high_performance:
+            sequence_number = _require_sequence_number(sequence_number)
+        return self._encrypt(plaintext, sequence_number=sequence_number, aad=aad)
 
     def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
         return self._decrypt(ciphertext, aad=aad)
@@ -588,6 +866,10 @@ class CryptoContext:
         """Clear the derived key cache."""
         with self._cache_lock:
             self._key_cache.clear()
+        with self._session_lock:
+            self._active_session_id = None
+            self._active_session_version = None
+            self._active_session_key = None
 
 
 def encrypt(
@@ -620,7 +902,7 @@ def decrypt(
     iterations: int = 128,
     prime: int = DEFAULT_PRIME,
 ) -> str:
-    """Authenticate and decrypt an FC3/FC5 AES-GCM/ChaCha20 or legacy FC2 payload."""
+    """Authenticate and decrypt FC3/FC5, legacy FC2, or context-managed FC7/FC8 data."""
     _validate_pepper(pepper)
     _validate_kdf_parameters(iterations, prime)
     version = ciphertext[:3]

@@ -8,5 +8,6 @@
 - `derive_key` uses the full SHA-256-derived seed; do not reintroduce a small modulo reduction because it creates a directly enumerable key space.
 - `encrypt` and `decrypt` require the same secret pepper; keep it outside the ciphertext and deployment source control.
 - Default AES-GCM payloads returned by `encrypt` use the versioned `FC3 + random_salt + nonce + ciphertext + GCM tag` format; opt-in replay protection uses authenticated `FC4` sequence numbers, while `decrypt` retains authenticated `FC2` migration support.
-- Build/package changes should be checked against `setup.py`, which now declares version `1.1.2`, runtime dependency `pycryptodomex>=3.22.0`, Python `>=3.8`, and a 256-bit default KDF prime in `fibcrypt.kdf`.
+- `CryptoContext(high_performance=True)` is the opt-in session mode: AES uses `FC7`, ChaCha20 uses `FC8`, and the Fibonacci session key is derived once per session. Keep session IDs and directions unique per traffic direction.
+- Build/package changes should be checked against `setup.py`, which now declares version `1.2.0`, runtime dependency `pycryptodomex>=3.22.0`, Python `>=3.8`, and a 256-bit default KDF prime in `fibcrypt.kdf`.
 - For PyPI uploads, use the repository-root `.pypirc` explicitly: `.venv/bin/twine upload --config-file .pypirc --repository pypi <artifacts>`; do not rely on the user-level Twine configuration.

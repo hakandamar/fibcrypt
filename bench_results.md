@@ -218,3 +218,22 @@
 | `decrypt` | 16 B ChaCha20-Poly1305 | 16.646 ms | 16.652 ms | 16.597 ms | 16.674 ms |
 
 Repeated decryption of the same 16-byte payload through `CryptoContext` measured approximately `0.034 ms` after the first cached derivation, with one cache entry retained. The cache is bounded at 128 entries.
+
+## v1.2.0 FC7/FC8 High-Performance Session Mode
+
+- Date: 2026-08-22
+- Change: Added opt-in session-key encryption with sequence-derived nonces; `FC7` uses AES-GCM and `FC8` uses ChaCha20-Poly1305.
+- Python: 3.14
+- Platform: macOS, Apple Silicon
+- Acceleration: `gmpy2` enabled
+- Configuration: explicit 16-byte session ID, `direction="uplink"`, replay protection enabled, seven samples after one warmup
+- Session setup: approximately `16.6 ms` per endpoint
+
+| Cipher | Input | Encrypt Mean | Decrypt Mean |
+| --- | ---: | ---: | ---: |
+| FC7 AES-GCM | 16 B | 0.029 ms | 0.034 ms |
+| FC7 AES-GCM | 1 KiB | 0.029 ms | 0.036 ms |
+| FC7 AES-GCM | 1 MiB | 6.349 ms | 6.338 ms |
+| FC8 ChaCha20-Poly1305 | 16 B | 0.014 ms | 0.021 ms |
+| FC8 ChaCha20-Poly1305 | 1 KiB | 0.015 ms | 0.021 ms |
+| FC8 ChaCha20-Poly1305 | 1 MiB | 2.141 ms | 2.251 ms |

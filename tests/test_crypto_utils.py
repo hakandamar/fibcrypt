@@ -17,6 +17,7 @@ from fibcrypt.kdf import derive_key
 from fibcrypt.utils import hash_to_int
 
 PEPPER = "deployment-pepper-with-at-least-32-bytes"
+SESSION_ID = b"\x01" * 16
 
 
 def _encode_legacy_fields(*values: str) -> bytes:
@@ -177,6 +178,170 @@ def test_replay_context_rejects_stateless_payload(cipher_mode: CipherMode) -> No
     receiver = CryptoContext("password", "salt", PEPPER, replay_protection=True)
 
     with pytest.raises(ValueError, match="requires an FC4 or FC6"):
+        receiver.decrypt(ciphertext)
+
+
+@pytest.mark.parametrize(
+    "cipher_mode, version",
+    [
+        (CipherMode.AES_GCM, b"FC7"),
+        (CipherMode.CHACHA20_POLY1305, b"FC8"),
+    ],
+)
+def test_high_performance_session_round_trip(
+    cipher_mode: CipherMode, version: bytes
+) -> None:
+    sender = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        replay_protection=True,
+        cipher_mode=cipher_mode,
+        high_performance=True,
+        session_id=SESSION_ID,
+        direction="uplink",
+    )
+    receiver = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        replay_protection=True,
+        cipher_mode=cipher_mode,
+        high_performance=True,
+        session_id=SESSION_ID,
+        direction="uplink",
+    )
+    ciphertext = sender.encrypt("session message", sequence_number=1, aad=b"base-station")
+
+    assert ciphertext.startswith(version)
+    assert receiver.decrypt(ciphertext, aad=b"base-station") == "session message"
+    with pytest.raises(ValueError, match="Replay detected"):
+        receiver.decrypt(ciphertext, aad=b"base-station")
+
+
+def test_high_performance_requires_sequence_number() -> None:
+    context = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        high_performance=True,
+        session_id=SESSION_ID,
+    )
+
+    with pytest.raises(ValueError, match="high-performance mode"):
+        context.encrypt("session message")
+
+
+def test_high_performance_requires_session_id() -> None:
+    with pytest.raises(ValueError, match="session_id is required"):
+        CryptoContext("password", "salt", PEPPER, high_performance=True)
+
+
+def test_high_performance_derives_session_key_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    derive_calls = 0
+    original_derive_key = crypto_utils.derive_key
+
+    def counted_derive_key(*args: object, **kwargs: object) -> int:
+        nonlocal derive_calls
+        derive_calls += 1
+        return original_derive_key(*args, **kwargs)
+
+    monkeypatch.setattr(crypto_utils, "derive_key", counted_derive_key)
+    sender = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        iterations=1,
+        high_performance=True,
+        session_id=SESSION_ID,
+    )
+    receiver = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        iterations=1,
+        high_performance=True,
+        session_id=SESSION_ID,
+    )
+    ciphertexts = [
+        sender.encrypt(f"message-{index}", sequence_number=index)
+        for index in range(3)
+    ]
+
+    assert derive_calls == 2
+    assert [receiver.decrypt(ciphertext) for ciphertext in ciphertexts] == [
+        "message-0",
+        "message-1",
+        "message-2",
+    ]
+    assert derive_calls == 2
+
+
+def test_high_performance_context_rejects_non_session_payload() -> None:
+    context = CryptoContext(
+        "password", "salt", PEPPER, high_performance=True, session_id=SESSION_ID
+    )
+    ciphertext = encrypt("normal message", "password", "salt", PEPPER)
+
+    with pytest.raises(ValueError, match="requires FC7 or FC8"):
+        context.decrypt(ciphertext)
+
+
+def test_high_performance_session_binds_direction_and_aad() -> None:
+    sender = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        high_performance=True,
+        session_id=SESSION_ID,
+        direction="uplink",
+    )
+    receiver = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        high_performance=True,
+        session_id=SESSION_ID,
+        direction="downlink",
+    )
+    ciphertext = sender.encrypt("session message", sequence_number=1, aad=b"telemetry")
+
+    with pytest.raises(ValueError, match="authentication failed"):
+        receiver.decrypt(ciphertext, aad=b"telemetry")
+
+    with pytest.raises(ValueError, match="authentication failed"):
+        receiver.decrypt(ciphertext, aad=b"control")
+
+
+def test_high_performance_sequence_number_is_authenticated() -> None:
+    sender = CryptoContext(
+        "password", "salt", PEPPER, high_performance=True, session_id=SESSION_ID
+    )
+    receiver = CryptoContext(
+        "password", "salt", PEPPER, high_performance=True, session_id=SESSION_ID
+    )
+    ciphertext = bytearray(sender.encrypt("session message", sequence_number=1))
+    sequence_offset = len(b"FC7") + len(SESSION_ID)
+    ciphertext[sequence_offset + 7] ^= 1
+
+    with pytest.raises(ValueError, match="authentication failed"):
+        receiver.decrypt(bytes(ciphertext))
+
+
+def test_high_performance_rejects_wrong_session_id() -> None:
+    sender = CryptoContext(
+        "password", "salt", PEPPER, high_performance=True, session_id=SESSION_ID
+    )
+    receiver = CryptoContext(
+        "password",
+        "salt",
+        PEPPER,
+        high_performance=True,
+        session_id=b"\x02" * 16,
+    )
+    ciphertext = sender.encrypt("session message", sequence_number=1)
+
+    with pytest.raises(ValueError, match="session_id"):
         receiver.decrypt(ciphertext)
 
 
