@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="fibcrypt",
-    version="1.1.0",
+    version="1.1.1",
     description="A fast Fibonacci-based cryptographic toolkit",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -15,6 +15,9 @@ setup(
     install_requires=[
         "pycryptodomex>=3.22.0"
     ],
+    extras_require={
+        "gmpy2": ["gmpy2>=2.1.0"],
+    },
     python_requires=">=3.8",
     classifiers=[
         "Programming Language :: Python :: 3",

@@ -3,9 +3,10 @@ import hmac
 import logging
 import os
 import threading
-from typing import Optional, Tuple
+from enum import Enum
+from typing import Dict, Optional, Tuple
 
-from Cryptodome.Cipher import AES
+from Cryptodome.Cipher import AES, ChaCha20_Poly1305
 from Cryptodome.Util.Padding import unpad
 
 from fibcrypt.fib import fibonacci_mod
@@ -24,9 +25,19 @@ _LEGACY_TAG_SIZE = hashlib.sha256().digest_size
 _REPLAY_VERSION = b"FC4"
 _SEQUENCE_SIZE = 8
 
+_CHACHA_NONCE_SIZE = 12
+_CHACHA_VERSION = b"FC5"
+_CHACHA_REPLAY_VERSION = b"FC6"
+
+
+class CipherMode(Enum):
+    AES_GCM = "aes-gcm"
+    CHACHA20_POLY1305 = "chacha20-poly1305"
+
 
 def int_to_bytes(val: int, length: int) -> bytes:
-    return val.to_bytes(length, byteorder="big")
+    mask = (1 << (length * 8)) - 1
+    return (val & mask).to_bytes(length, byteorder="big")
 
 
 def _derive_encryption_key(
@@ -110,20 +121,29 @@ def _require_sequence_number(sequence_number: Optional[int]) -> int:
     return sequence_number
 
 
-def _encrypt_replay_protected(
+def _encrypt_aes_gcm(
     plaintext: str,
     password: str,
     salt: str,
     pepper: str,
-    sequence_number: int,
-    aad: bytes,
     iterations: int,
     prime: int,
+    *,
+    random_salt: Optional[bytes] = None,
+    nonce: Optional[bytes] = None,
+    version: bytes = _VERSION,
+    sequence_number: Optional[int] = None,
+    aad: bytes = b"",
 ) -> bytes:
-    random_salt = os.urandom(_SALT_SIZE)
+    if random_salt is None:
+        random_salt = os.urandom(_SALT_SIZE)
     key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-    nonce = os.urandom(_GCM_NONCE_SIZE)
-    header = _REPLAY_VERSION + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+    if nonce is None:
+        nonce = os.urandom(_GCM_NONCE_SIZE)
+    if sequence_number is not None:
+        header = version + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+    else:
+        header = version
     header += random_salt + nonce
     cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
     cipher.update(header + aad)
@@ -131,128 +151,153 @@ def _encrypt_replay_protected(
     return header + encrypted + tag
 
 
-def _decrypt_replay_protected(
-    ciphertext: bytes,
-    password: str,
-    salt: str,
-    pepper: str,
-    aad: bytes,
-    replay_guard: ReplayGuard,
-    iterations: int,
-    prime: int,
-) -> str:
-    header_size = len(_REPLAY_VERSION) + _SEQUENCE_SIZE + _SALT_SIZE + _GCM_NONCE_SIZE
-    if len(ciphertext) < header_size + _TAG_SIZE or not ciphertext.startswith(_REPLAY_VERSION):
-        raise ValueError("Unsupported or malformed replay-protected ciphertext")
-    sequence_end = len(_REPLAY_VERSION) + _SEQUENCE_SIZE
-    random_salt_start = sequence_end
-    random_salt_end = random_salt_start + _SALT_SIZE
-    nonce_end = random_salt_end + _GCM_NONCE_SIZE
-    sequence_number = int.from_bytes(ciphertext[len(_REPLAY_VERSION):sequence_end], "big")
-    random_salt = ciphertext[random_salt_start:random_salt_end]
-    nonce = ciphertext[random_salt_end:nonce_end]
-    header = ciphertext[:nonce_end]
-    encrypted = ciphertext[nonce_end:-_TAG_SIZE]
-    tag = ciphertext[-_TAG_SIZE:]
-    key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
-    cipher.update(header + aad)
-    try:
-        plaintext = cipher.decrypt_and_verify(encrypted, tag)
-    except ValueError as exc:
-        raise ValueError("Ciphertext authentication failed") from exc
-    if not replay_guard.accept(sequence_number):
-        raise ValueError("Replay detected or sequence number outside replay window")
-    return plaintext.decode("utf-8")
-
-
-class CryptoContext:
-    """Configured encryption context with optional replay protection."""
-
-    def __init__(
-        self,
-        password: str,
-        salt: str,
-        pepper: str,
-        *,
-        replay_protection: bool = False,
-        replay_window: int = 64,
-        iterations: int = 128,
-        prime: int = DEFAULT_PRIME,
-    ) -> None:
-        _validate_pepper(pepper)
-        self.password = password
-        self.salt = salt
-        self.pepper = pepper
-        self.iterations = iterations
-        self.prime = prime
-        self.replay_protection = replay_protection
-        self.replay_guard = ReplayGuard(replay_window) if replay_protection else None
-
-    def encrypt(
-        self,
-        plaintext: str,
-        *,
-        sequence_number: Optional[int] = None,
-        aad: bytes = b"",
-    ) -> bytes:
-        if not self.replay_protection:
-            return encrypt(
-                plaintext, self.password, self.salt, self.pepper, self.iterations, self.prime
-            )
-        return _encrypt_replay_protected(
-            plaintext,
-            self.password,
-            self.salt,
-            self.pepper,
-            _require_sequence_number(sequence_number),
-            aad,
-            self.iterations,
-            self.prime,
-        )
-
-    def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
-        if not self.replay_protection:
-            return decrypt(
-                ciphertext, self.password, self.salt, self.pepper, self.iterations, self.prime
-            )
-        if self.replay_guard is None:
-            raise RuntimeError("replay guard is not initialized")
-        return _decrypt_replay_protected(
-            ciphertext,
-            self.password,
-            self.salt,
-            self.pepper,
-            aad,
-            self.replay_guard,
-            self.iterations,
-            self.prime,
-        )
-
-
-def encrypt(
+def _encrypt_chacha20(
     plaintext: str,
     password: str,
     salt: str,
     pepper: str,
-    iterations: int = 128,
-    prime: int = DEFAULT_PRIME,
+    iterations: int,
+    prime: int,
+    *,
+    random_salt: Optional[bytes] = None,
+    nonce: Optional[bytes] = None,
+    version: bytes = _CHACHA_VERSION,
+    sequence_number: Optional[int] = None,
+    aad: bytes = b"",
 ) -> bytes:
-    """Encrypt plaintext with AES-GCM and authenticate it in one operation."""
-    _validate_pepper(pepper)
-    random_salt = os.urandom(_SALT_SIZE)
+    if random_salt is None:
+        random_salt = os.urandom(_SALT_SIZE)
     key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-    nonce = os.urandom(_GCM_NONCE_SIZE)
-    header = _VERSION + random_salt + nonce
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
-    cipher.update(header)
+    if nonce is None:
+        nonce = os.urandom(_CHACHA_NONCE_SIZE)
+    if sequence_number is not None:
+        header = version + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
+    else:
+        header = version
+    header += random_salt + nonce
+    cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
+    cipher.update(header + aad)
     encrypted, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
-    logger.debug(
-        "Encryption completed: iterations=%d, plaintext_bytes=%d",
-        iterations,
-        len(plaintext.encode("utf-8")),
-    )
     return header + encrypted + tag
+
+
+def _decrypt_aes_gcm(
+    ciphertext: bytes,
+    password: str,
+    salt: str,
+    pepper: str,
+    iterations: int,
+    prime: int,
+    *,
+    aad: bytes = b"",
+    replay_guard: Optional[ReplayGuard] = None,
+) -> str:
+    version = ciphertext[:3]
+    if version == _REPLAY_VERSION:
+        header_size = len(_REPLAY_VERSION) + _SEQUENCE_SIZE + _SALT_SIZE + _GCM_NONCE_SIZE
+        if len(ciphertext) < header_size + _TAG_SIZE:
+            raise ValueError("Unsupported or malformed replay-protected ciphertext")
+        sequence_end = len(_REPLAY_VERSION) + _SEQUENCE_SIZE
+        random_salt_start = sequence_end
+        random_salt_end = random_salt_start + _SALT_SIZE
+        nonce_end = random_salt_end + _GCM_NONCE_SIZE
+        sequence_number = int.from_bytes(ciphertext[len(_REPLAY_VERSION):sequence_end], "big")
+        random_salt = ciphertext[random_salt_start:random_salt_end]
+        nonce = ciphertext[random_salt_end:nonce_end]
+        header = ciphertext[:nonce_end]
+        encrypted = ciphertext[nonce_end:-_TAG_SIZE]
+        tag = ciphertext[-_TAG_SIZE:]
+        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
+        cipher.update(header + aad)
+        try:
+            plaintext = cipher.decrypt_and_verify(encrypted, tag)
+        except ValueError as exc:
+            raise ValueError("Ciphertext authentication failed") from exc
+        if replay_guard is not None and not replay_guard.accept(sequence_number):
+            raise ValueError("Replay detected or sequence number outside replay window")
+        return plaintext.decode("utf-8")
+    else:
+        minimum_size = len(_VERSION) + _SALT_SIZE + _GCM_NONCE_SIZE + _TAG_SIZE
+        if len(ciphertext) < minimum_size or not ciphertext.startswith(_VERSION):
+            raise ValueError("Unsupported or malformed ciphertext")
+        random_salt_start = len(_VERSION)
+        random_salt_end = random_salt_start + _SALT_SIZE
+        nonce_end = random_salt_end + _GCM_NONCE_SIZE
+        random_salt = ciphertext[random_salt_start:random_salt_end]
+        nonce = ciphertext[random_salt_end:nonce_end]
+        header = ciphertext[:nonce_end]
+        encrypted = ciphertext[nonce_end:-_TAG_SIZE]
+        tag = ciphertext[-_TAG_SIZE:]
+        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
+        cipher.update(header + aad)
+        try:
+            plaintext = cipher.decrypt_and_verify(encrypted, tag)
+        except ValueError as exc:
+            raise ValueError("Ciphertext authentication failed") from exc
+        return plaintext.decode("utf-8")
+
+
+def _decrypt_chacha20(
+    ciphertext: bytes,
+    password: str,
+    salt: str,
+    pepper: str,
+    iterations: int,
+    prime: int,
+    *,
+    aad: bytes = b"",
+    replay_guard: Optional[ReplayGuard] = None,
+) -> str:
+    version = ciphertext[:3]
+    if version == _CHACHA_REPLAY_VERSION:
+        header_size = len(_CHACHA_REPLAY_VERSION) + _SEQUENCE_SIZE + _SALT_SIZE + _CHACHA_NONCE_SIZE
+        if len(ciphertext) < header_size + _TAG_SIZE:
+            raise ValueError("Unsupported or malformed replay-protected chacha ciphertext")
+        sequence_end = len(_CHACHA_REPLAY_VERSION) + _SEQUENCE_SIZE
+        random_salt_start = sequence_end
+        random_salt_end = random_salt_start + _SALT_SIZE
+        nonce_end = random_salt_end + _CHACHA_NONCE_SIZE
+        version_len = len(_CHACHA_REPLAY_VERSION)
+        sequence_number = int.from_bytes(
+            ciphertext[version_len:sequence_end], "big"
+        )
+        random_salt = ciphertext[random_salt_start:random_salt_end]
+        nonce = ciphertext[random_salt_end:nonce_end]
+        header = ciphertext[:nonce_end]
+        encrypted = ciphertext[nonce_end:-_TAG_SIZE]
+        tag = ciphertext[-_TAG_SIZE:]
+        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
+        cipher.update(header + aad)
+        try:
+            plaintext = cipher.decrypt_and_verify(encrypted, tag)
+        except ValueError as exc:
+            raise ValueError("Ciphertext authentication failed") from exc
+        if replay_guard is not None and not replay_guard.accept(sequence_number):
+            raise ValueError("Replay detected or sequence number outside replay window")
+        return plaintext.decode("utf-8")
+    else:
+        minimum_size = len(_CHACHA_VERSION) + _SALT_SIZE + _CHACHA_NONCE_SIZE + _TAG_SIZE
+        if len(ciphertext) < minimum_size or not ciphertext.startswith(_CHACHA_VERSION):
+            raise ValueError("Unsupported or malformed chacha ciphertext")
+        random_salt_start = len(_CHACHA_VERSION)
+        random_salt_end = random_salt_start + _SALT_SIZE
+        nonce_end = random_salt_end + _CHACHA_NONCE_SIZE
+        random_salt = ciphertext[random_salt_start:random_salt_end]
+        nonce = ciphertext[random_salt_end:nonce_end]
+        header = ciphertext[:nonce_end]
+        encrypted = ciphertext[nonce_end:-_TAG_SIZE]
+        tag = ciphertext[-_TAG_SIZE:]
+        key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
+        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
+        cipher.update(header + aad)
+        try:
+            plaintext = cipher.decrypt_and_verify(encrypted, tag)
+        except ValueError as exc:
+            raise ValueError("Ciphertext authentication failed") from exc
+        return plaintext.decode("utf-8")
 
 
 def _decrypt_legacy(
@@ -284,6 +329,177 @@ def _decrypt_legacy(
     ).decode("utf-8")
 
 
+class CryptoContext:
+    """Configured encryption context with optional replay protection and key caching."""
+
+    def __init__(
+        self,
+        password: str,
+        salt: str,
+        pepper: str,
+        *,
+        replay_protection: bool = False,
+        replay_window: int = 64,
+        iterations: int = 128,
+        prime: int = DEFAULT_PRIME,
+        cipher_mode: CipherMode = CipherMode.AES_GCM,
+    ) -> None:
+        _validate_pepper(pepper)
+        self.password = password
+        self.salt = salt
+        self.pepper = pepper
+        self.iterations = iterations
+        self.prime = prime
+        self.replay_protection = replay_protection
+        self.replay_guard = ReplayGuard(replay_window) if replay_protection else None
+        self.cipher_mode = cipher_mode
+        self._key_cache: "Dict[tuple, bytes]" = {}
+        self._cache_lock = threading.Lock()
+
+    def _get_cached_key(self, random_salt: bytes, domain: str = "encryption") -> bytes:
+        cache_key = (
+            self.password,
+            self.salt,
+            self.pepper,
+            random_salt,
+            domain,
+            self.iterations,
+            self.prime,
+        )
+        with self._cache_lock:
+            if cache_key not in self._key_cache:
+                derivation_salt = f"{self.salt}:{random_salt.hex()}:{domain}"
+                self._key_cache[cache_key] = int_to_bytes(
+                    derive_key(
+                        self.password,
+                        derivation_salt,
+                        self.pepper,
+                        self.iterations,
+                        self.prime,
+                    ),
+                    32,
+                )
+            return self._key_cache[cache_key]
+
+    def _encrypt_with_cached_key(
+        self,
+        plaintext: str,
+        *,
+        sequence_number: Optional[int] = None,
+        aad: bytes = b"",
+    ) -> bytes:
+        random_salt = os.urandom(_SALT_SIZE)
+        _ = self._get_cached_key(random_salt)
+        if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
+            return _encrypt_chacha20(
+                plaintext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+                random_salt=random_salt,
+                version=_CHACHA_REPLAY_VERSION if self.replay_protection else _CHACHA_VERSION,
+                sequence_number=sequence_number,
+                aad=aad,
+            )
+        else:
+            return _encrypt_aes_gcm(
+                plaintext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+                random_salt=random_salt,
+                version=_REPLAY_VERSION if self.replay_protection else _VERSION,
+                sequence_number=sequence_number,
+                aad=aad,
+            )
+
+    def _decrypt_with_cached_key(
+        self,
+        ciphertext: bytes,
+        *,
+        aad: bytes = b"",
+    ) -> str:
+        version = ciphertext[:3]
+        if version in (_REPLAY_VERSION, _VERSION):
+            return _decrypt_aes_gcm(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+                aad=aad,
+                replay_guard=self.replay_guard,
+            )
+        elif version in (_CHACHA_REPLAY_VERSION, _CHACHA_VERSION):
+            return _decrypt_chacha20(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+                aad=aad,
+                replay_guard=self.replay_guard,
+            )
+        else:
+            return _decrypt_legacy(
+                ciphertext,
+                self.password,
+                self.salt,
+                self.pepper,
+                self.iterations,
+                self.prime,
+            )
+
+    def encrypt(
+        self,
+        plaintext: str,
+        *,
+        sequence_number: Optional[int] = None,
+        aad: bytes = b"",
+    ) -> bytes:
+        if not self.replay_protection:
+            return self._encrypt_with_cached_key(plaintext, aad=aad)
+        return self._encrypt_with_cached_key(
+            plaintext,
+            sequence_number=_require_sequence_number(sequence_number),
+            aad=aad,
+        )
+
+    def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
+        return self._decrypt_with_cached_key(ciphertext, aad=aad)
+
+    def clear_cache(self) -> None:
+        """Clear the derived key cache."""
+        with self._cache_lock:
+            self._key_cache.clear()
+
+
+def encrypt(
+    plaintext: str,
+    password: str,
+    salt: str,
+    pepper: str,
+    iterations: int = 128,
+    prime: int = DEFAULT_PRIME,
+    cipher_mode: CipherMode = CipherMode.AES_GCM,
+) -> bytes:
+    """Encrypt plaintext with AES-GCM or ChaCha20-Poly1305 and authenticate it in one operation."""
+    _validate_pepper(pepper)
+    if cipher_mode == CipherMode.CHACHA20_POLY1305:
+        return _encrypt_chacha20(
+            plaintext, password, salt, pepper, iterations, prime
+        )
+    return _encrypt_aes_gcm(
+        plaintext, password, salt, pepper, iterations, prime
+    )
+
+
 def decrypt(
     ciphertext: bytes,
     password: str,
@@ -292,31 +508,14 @@ def decrypt(
     iterations: int = 128,
     prime: int = DEFAULT_PRIME,
 ) -> str:
-    """Authenticate and decrypt an FC3 AES-GCM or legacy FC2 payload."""
+    """Authenticate and decrypt an FC3/FC5 AES-GCM/ChaCha20 or legacy FC2 payload."""
     _validate_pepper(pepper)
-    if ciphertext.startswith(_LEGACY_VERSION):
+    version = ciphertext[:3]
+    if version == _LEGACY_VERSION:
         return _decrypt_legacy(ciphertext, password, salt, pepper, iterations, prime)
-    minimum_size = len(_VERSION) + _SALT_SIZE + _GCM_NONCE_SIZE + _TAG_SIZE
-    if len(ciphertext) < minimum_size or not ciphertext.startswith(_VERSION):
+    elif version in (_VERSION, _REPLAY_VERSION):
+        return _decrypt_aes_gcm(ciphertext, password, salt, pepper, iterations, prime)
+    elif version in (_CHACHA_VERSION, _CHACHA_REPLAY_VERSION):
+        return _decrypt_chacha20(ciphertext, password, salt, pepper, iterations, prime)
+    else:
         raise ValueError("Unsupported or malformed ciphertext")
-    random_salt_start = len(_VERSION)
-    random_salt_end = random_salt_start + _SALT_SIZE
-    nonce_end = random_salt_end + _GCM_NONCE_SIZE
-    random_salt = ciphertext[random_salt_start:random_salt_end]
-    nonce = ciphertext[random_salt_end:nonce_end]
-    header = ciphertext[:nonce_end]
-    encrypted = ciphertext[nonce_end:-_TAG_SIZE]
-    tag = ciphertext[-_TAG_SIZE:]
-    key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
-    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
-    cipher.update(header)
-    try:
-        plaintext = cipher.decrypt_and_verify(encrypted, tag)
-    except ValueError as exc:
-        raise ValueError("Ciphertext authentication failed") from exc
-    logger.debug(
-        "Decryption completed: iterations=%d, plaintext_bytes=%d",
-        iterations,
-        len(plaintext),
-    )
-    return plaintext.decode("utf-8")
