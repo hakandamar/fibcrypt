@@ -242,6 +242,33 @@ Both `iterations` and `prime` can be overridden explicitly for experiments and b
 and `prime` must be greater than one. Changing these values changes the derived keys, so the parameters must remain
 consistent between encryption and decryption.
 
+## KDF Comparison
+
+Fibcrypt, Argon2id, and scrypt solve related but different engineering problems. The table compares the constructions
+as password-based key derivation functions, not the complete encryption protocols around them.
+
+| Property | Fibcrypt | Argon2id | scrypt |
+| --- | --- | --- | --- |
+| Primary design | Low-latency key derivation integrated with authenticated encryption and optional sessions | Memory-hard password hashing and key derivation | Sequential memory-hard password-based key derivation |
+| Core construction | HKDF-SHA-256 seed derivation followed by 128 modular Fibonacci values XORed together | BLAKE2b-based memory-filling function with Argon2i/Argon2d hybrid access pattern | PBKDF2-HMAC-SHA-256 around ROMix and Salsa20/8 |
+| Memory cost | Constant and small; no large working memory allocation | Explicitly tunable from MiB-scale to GiB-scale deployments | Tunable through `N`, `r`, and `p`; approximate working memory is `128 * N * r * p` bytes |
+| CPU and latency control | `iterations=128`; selected for low latency; session mode derives one key per session | Tunable `t` passes, `m` memory, and `p` lanes | Tunable `N` CPU/memory cost, `r` block size, and `p` parallelism |
+| GPU/ASIC cost model | CPU-oriented arithmetic with little memory pressure | Memory bandwidth and capacity are part of the attacker cost | Memory bandwidth and sequential ROMix work are part of the attacker cost |
+| Salt and secret input | Caller salt plus per-payload/session context; deployment pepper is required and kept secret | Unique public salt; optional secret value can be supplied by an integration | Unique public salt; a pepper requires an application-level wrapper |
+| Output | 256-bit key material consumed by `FC3`-`FC8` authenticated formats | Variable-length tag/key output | Variable-length derived key output |
+| Project measurement | About 17 ms per KDF and 59 known-pepper candidates/second with `gmpy2` on the development machine | Not benchmarked in this project; cost depends on `m`, `t`, `p`, and hardware | Not benchmarked in this project; cost depends on `N`, `r`, `p`, and hardware |
+| Best fit | Latency-sensitive edge encryption where low memory use and a deployment pepper are acceptable design choices | Password storage and password-derived keys where memory can be deliberately allocated; Argon2id is the standard variant to select | Password-derived keys where a mature memory-hard construction and existing scrypt ecosystem are preferred |
+| Main tradeoff | Low memory and low latency, with less attacker-cost leverage from memory hardness | Higher memory and setup cost, requiring per-service resource budgeting | Higher memory and setup cost, with more parameters to tune for the target platform |
+
+For a password-derived key exposed to offline guessing, the practical choice is normally Argon2id or scrypt with
+parameters measured on the target system. Fibcrypt occupies a different point in the design space: it prioritizes
+low-latency, low-memory operation and uses the deployment pepper as a required secret input. The Fibcrypt measurements
+above must not be read as speed comparisons against Argon2id or scrypt because those algorithms were not benchmarked with
+matched parameters on the same machine.
+
+Reference specifications: [RFC 9106 (Argon2)](https://www.rfc-editor.org/rfc/rfc9106.html) and
+[RFC 7914 (scrypt)](https://www.rfc-editor.org/rfc/rfc7914.html).
+
 ## Performance
 
 On the development benchmark machine (Python 3.14, Apple Silicon), the release comparison is:
