@@ -1,8 +1,28 @@
 # fibcrypt
 
-`fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design with AES-256-GCM authenticated encryption.
+[![PyPI version](https://img.shields.io/pypi/v/fibcrypt.svg)](https://pypi.org/project/fibcrypt/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fibcrypt.svg)](https://pypi.org/project/fibcrypt/)
+[![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
+[![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-It is designed for applications that need many low-latency encryption/decryption operations and want to evaluate an alternative, transparent cryptographic construction. It is **not** presented as a replacement for Argon2, scrypt, or other independently reviewed password KDFs.
+`fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design with authenticated encryption.
+
+It is designed for applications that need many low-latency encryption/decryption operations and want to evaluate an alternative, transparent cryptographic construction. It is **experimental cryptographic software**, not a replacement for Argon2, scrypt, or other independently reviewed password KDFs.
+
+## Project Status
+
+The project is maintained as an experimental, independently unaudited
+cryptographic toolkit. The public API and wire formats may evolve between
+minor releases. Review the [security policy](SECURITY.md) before using the
+package in a production or regulated environment.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Articles
+
+- [Part 2 (2026): fibcrypt v1.0 Stable - Authenticated Fibonacci-Based
+  Encryption for Edge Workloads](https://hakandamar.com/fibcrypt-v1-0-stable-authenticated-fibonacci-based-encryption-for-edge-workloads-41cb9650512e)
+- [Part 1 (2025): A Lightweight Cryptographic Toolkit Based on Fibonacci Matrix
+  Exponentiation](https://hakandamar.com/a-lightweight-cryptographic-toolkit-based-on-fibonacci-matrix-exponentiation-fibcrypt-484a9cf0a0a1)
 
 ## What It Provides
 
@@ -310,15 +330,37 @@ The v0.1.5 format was `iv + ciphertext` and used different key derivation defaul
 
 ## Development
 
+Clone the repository and install the development dependencies in a virtual
+environment:
+
 ```bash
-python3 -m pip install -r requirements-dev.txt
-python3 -m pytest
-ruff check .
-mypy
-PYTHONPATH=. python3 test/main.py
-PYTHONPATH=. python3 scripts/nist_sp800_22.py
+git clone https://github.com/hakandamar/fibcrypt.git
+cd fibcrypt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
 ```
+
+Run the test and quality checks:
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+.venv/bin/mypy
+.venv/bin/python -m build
+.venv/bin/twine check dist/*
+PYTHONPATH=. .venv/bin/python test/main.py
+PYTHONPATH=. .venv/bin/python scripts/nist_sp800_22.py
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request and development
+guidelines. Continuous integration runs tests on the supported Python range.
+
+## Security
+
+Report suspected vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md). Do not include real credentials, deployment
+peppers, or customer data in issues, pull requests, or benchmark files.
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the [MIT License](LICENSE).

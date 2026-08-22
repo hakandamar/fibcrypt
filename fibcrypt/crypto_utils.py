@@ -41,11 +41,15 @@ _KEY_CACHE_SIZE = 128
 
 
 class CipherMode(Enum):
+    """Authenticated-encryption modes supported by the public API."""
+
     AES_GCM = "aes-gcm"
     CHACHA20_POLY1305 = "chacha20-poly1305"
 
 
 def int_to_bytes(val: int, length: int) -> bytes:
+    """Return ``val`` as a fixed-width big-endian byte string."""
+
     if val < 0 or val >= 1 << (length * 8):
         raise ValueError("integer does not fit in requested byte length")
     return val.to_bytes(length, byteorder="big")
@@ -59,6 +63,8 @@ def _derive_encryption_key(
     iterations: int,
     prime: int,
 ) -> bytes:
+    """Derive the current per-payload encryption key for FC3/FC4 data."""
+
     derivation_salt = f"{salt}:{random_salt.hex()}:encryption"
     return int_to_bytes(
         derive_key(password, derivation_salt, pepper, iterations, prime), 32
@@ -73,6 +79,8 @@ def _derive_legacy_fc3_encryption_key(
     iterations: int,
     prime: int,
 ) -> bytes:
+    """Derive the pre-HKDF encryption key needed for FC3/FC4 migration."""
+
     derivation_salt = f"{salt}:{random_salt.hex()}:encryption"
     return int_to_bytes(
         _derive_legacy_fc3_key(password, derivation_salt, pepper, iterations, prime),
@@ -102,16 +110,22 @@ def _derive_legacy_keys(
 
 
 def _validate_pepper(pepper: str) -> None:
+    """Reject deployment peppers that do not meet the minimum byte length."""
+
     if len(pepper.encode("utf-8")) < MIN_PEPPER_BYTES:
         raise ValueError(f"pepper must be at least {MIN_PEPPER_BYTES} bytes")
 
 
 def _validate_cipher_mode(cipher_mode: CipherMode) -> None:
+    """Validate that a caller selected a supported cipher enum value."""
+
     if not isinstance(cipher_mode, CipherMode):
         raise ValueError("cipher_mode must be a CipherMode value")
 
 
 def _validate_session_id(session_id: Optional[bytes]) -> None:
+    """Validate the fixed-width identifier used by FC7/FC8 sessions."""
+
     if session_id is not None and (
         not isinstance(session_id, bytes) or len(session_id) != _SESSION_ID_SIZE
     ):
@@ -119,14 +133,23 @@ def _validate_session_id(session_id: Optional[bytes]) -> None:
 
 
 def _validate_direction(direction: str) -> None:
+    """Validate the direction label used for session-key domain separation."""
+
     if not isinstance(direction, str) or not direction:
         raise ValueError("direction must be a non-empty string")
 
 
 class ReplayGuard:
-    """Thread-safe sliding-window state for authenticated sequence numbers."""
+    """Thread-safe sliding-window state for authenticated sequence numbers.
+
+    The window stores the highest accepted sequence number and a bitmask of
+    previously accepted values behind it. Bit zero represents the highest
+    value; older values occupy progressively higher bits.
+    """
 
     def __init__(self, window_size: int = 64) -> None:
+        """Create a replay window containing at most ``window_size`` values."""
+
         if window_size < 1 or window_size > 64:
             raise ValueError("window_size must be between 1 and 64")
         self.window_size = window_size
@@ -135,6 +158,8 @@ class ReplayGuard:
         self._lock = threading.Lock()
 
     def accept(self, sequence_number: int) -> bool:
+        """Accept a new sequence number unless it is duplicate or too old."""
+
         if sequence_number < 0 or sequence_number >= 2**64:
             return False
         with self._lock:
@@ -144,6 +169,7 @@ class ReplayGuard:
                 return True
             if sequence_number > self._highest_seen:
                 shift = sequence_number - self._highest_seen
+                # Shift the history toward older values and mark the new high bit.
                 self._seen = 1 if shift >= self.window_size else (
                     (self._seen << shift) | 1
                 ) & ((1 << self.window_size) - 1)
@@ -159,6 +185,8 @@ class ReplayGuard:
 def _require_sequence_number(
     sequence_number: Optional[int], feature: str = "replay protection"
 ) -> int:
+    """Validate and return an unsigned 64-bit sequence number."""
+
     if sequence_number is None:
         raise ValueError(f"sequence_number is required when {feature} is enabled")
     if sequence_number < 0 or sequence_number >= 2**64:
@@ -180,6 +208,8 @@ def _encrypt_aes_gcm(
     sequence_number: Optional[int] = None,
     aad: bytes = b"",
 ) -> bytes:
+    """Encrypt one AES-GCM payload in the FC3 or FC4 wire format."""
+
     if random_salt is None:
         random_salt = os.urandom(_SALT_SIZE)
     key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
@@ -210,6 +240,8 @@ def _encrypt_chacha20(
     sequence_number: Optional[int] = None,
     aad: bytes = b"",
 ) -> bytes:
+    """Encrypt one ChaCha20-Poly1305 payload in the FC5 or FC6 format."""
+
     if random_salt is None:
         random_salt = os.urandom(_SALT_SIZE)
     key = _derive_encryption_key(password, salt, pepper, random_salt, iterations, prime)
@@ -227,7 +259,13 @@ def _encrypt_chacha20(
 
 
 def _session_nonce(sequence_number: int) -> bytes:
-    """Build a 96-bit nonce from a session-unique 64-bit sequence number."""
+    """Build a 96-bit nonce from a session-unique 64-bit sequence number.
+
+    The sequence number must never repeat for the same session ID and
+    direction. The four-byte zero prefix expands the 64-bit counter to the
+    96-bit nonce size required by both supported AEAD implementations.
+    """
+
     return b"\0" * 4 + sequence_number.to_bytes(_SEQUENCE_SIZE, "big")
 
 
@@ -241,6 +279,13 @@ def _derive_session_key(
     iterations: int,
     prime: int,
 ) -> bytes:
+    """Derive the single cached key used by one FC7 or FC8 session.
+
+    The session ID, direction, and wire-format version are part of the KDF
+    domain so that keys cannot be reused across traffic directions or cipher
+    formats.
+    """
+
     direction_hex = direction.encode("utf-8").hex()
     derivation_salt = (
         f"{salt}:{session_id.hex()}:session:{direction_hex}:{version.decode('ascii')}"
@@ -257,6 +302,8 @@ def _encrypt_high_performance_aes(
     sequence_number: int,
     aad: bytes,
 ) -> bytes:
+    """Encrypt one FC7 AES-GCM message using a pre-derived session key."""
+
     header = (
         _HIGH_PERFORMANCE_AES_VERSION
         + session_id
@@ -275,6 +322,8 @@ def _encrypt_high_performance_chacha20(
     sequence_number: int,
     aad: bytes,
 ) -> bytes:
+    """Encrypt one FC8 ChaCha20-Poly1305 message using a session key."""
+
     header = (
         _HIGH_PERFORMANCE_CHACHA_VERSION
         + session_id
@@ -299,6 +348,8 @@ def _decrypt_high_performance_aes(
     replay_guard: Optional[ReplayGuard] = None,
     encryption_key: Optional[bytes] = None,
 ) -> str:
+    """Authenticate and decrypt an FC7 AES-GCM session payload."""
+
     header_size = 3 + _SESSION_ID_SIZE + _SEQUENCE_SIZE
     if len(ciphertext) < header_size + _TAG_SIZE or not ciphertext.startswith(
         _HIGH_PERFORMANCE_AES_VERSION
@@ -346,6 +397,8 @@ def _decrypt_high_performance_chacha20(
     replay_guard: Optional[ReplayGuard] = None,
     encryption_key: Optional[bytes] = None,
 ) -> str:
+    """Authenticate and decrypt an FC8 ChaCha20-Poly1305 session payload."""
+
     header_size = 3 + _SESSION_ID_SIZE + _SEQUENCE_SIZE
     if len(ciphertext) < header_size + _TAG_SIZE or not ciphertext.startswith(
         _HIGH_PERFORMANCE_CHACHA_VERSION
@@ -388,6 +441,8 @@ def _decrypt_aes_gcm_payload(
     tag: bytes,
     aad: bytes,
 ) -> bytes:
+    """Authenticate and decrypt an AES-GCM payload after header parsing."""
+
     cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=_TAG_SIZE)
     cipher.update(header + aad)
     try:
@@ -408,6 +463,8 @@ def _decrypt_aes_gcm(
     replay_guard: Optional[ReplayGuard] = None,
     encryption_key: Optional[bytes] = None,
 ) -> str:
+    """Decrypt an FC3 or FC4 AES-GCM payload and enforce replay state."""
+
     version = ciphertext[:3]
     if version == _REPLAY_VERSION:
         header_size = len(_REPLAY_VERSION) + _SEQUENCE_SIZE + _SALT_SIZE + _GCM_NONCE_SIZE
@@ -483,6 +540,8 @@ def _decrypt_chacha20(
     replay_guard: Optional[ReplayGuard] = None,
     encryption_key: Optional[bytes] = None,
 ) -> str:
+    """Decrypt an FC5 or FC6 ChaCha20-Poly1305 payload."""
+
     version = ciphertext[:3]
     if version == _CHACHA_REPLAY_VERSION:
         header_size = len(_CHACHA_REPLAY_VERSION) + _SEQUENCE_SIZE + _SALT_SIZE + _CHACHA_NONCE_SIZE
@@ -545,6 +604,8 @@ def _decrypt_legacy(
     iterations: int,
     prime: int,
 ) -> str:
+    """Authenticate and decrypt the legacy FC2 AES-CBC/HMAC payload."""
+
     minimum_size = len(_LEGACY_VERSION) + _SALT_SIZE + _IV_SIZE + AES.block_size + _LEGACY_TAG_SIZE
     if len(ciphertext) < minimum_size:
         raise ValueError("Unsupported or malformed ciphertext")
@@ -567,7 +628,14 @@ def _decrypt_legacy(
 
 
 class CryptoContext:
-    """Configured context with replay protection, bounded caching, and session mode."""
+    """Configured encryption context with caching and optional replay defense.
+
+    Stateless contexts emit FC3/FC5 payloads. Enabling ``replay_protection``
+    changes those formats to FC4/FC6 and requires a sequence number for every
+    encrypted message. Enabling ``high_performance`` selects FC7/FC8 and
+    derives one session key during initialization; it always requires a
+    16-byte ``session_id`` and a sequence number for nonce construction.
+    """
 
     def __init__(
         self,
@@ -584,6 +652,26 @@ class CryptoContext:
         session_id: Optional[bytes] = None,
         direction: str = "default",
     ) -> None:
+        """Create a context and validate its wire-format configuration.
+
+        Args:
+            password: Password input for the Fibonacci-based KDF.
+            salt: Public caller-provided context that must match at decryption.
+            pepper: Secret deployment value of at least 32 UTF-8 bytes.
+            replay_protection: Enable the in-process sliding replay window.
+            replay_window: Number of recent sequence numbers to retain.
+            iterations: Number of Fibonacci KDF rounds.
+            prime: Positive modulus used by the Fibonacci arithmetic.
+            cipher_mode: AES-GCM or ChaCha20-Poly1305.
+            high_performance: Use the one-key-per-session FC7/FC8 formats.
+            session_id: Exactly 16 bytes shared by both session endpoints.
+            direction: Session traffic direction included in key separation.
+
+        Raises:
+            ValueError: If a parameter is invalid or session mode is
+                configured without a session ID.
+        """
+
         _validate_pepper(pepper)
         _validate_kdf_parameters(iterations, prime)
         _validate_cipher_mode(cipher_mode)
@@ -616,6 +704,8 @@ class CryptoContext:
             self._get_session_key(session_id, self._version_for_mode())
 
     def _get_cached_key(self, key_material: bytes, domain: str = "encryption") -> bytes:
+        """Return a bounded LRU-style cached key for the given domain."""
+
         cache_key = (
             self.password,
             self.salt,
@@ -650,6 +740,8 @@ class CryptoContext:
     def _cached_key_for_ciphertext(
         self, ciphertext: bytes, version: bytes
     ) -> Optional[bytes]:
+        """Extract the random salt and retrieve a stateless payload key."""
+
         salt_start = len(version)
         if version in (_REPLAY_VERSION, _CHACHA_REPLAY_VERSION):
             salt_start += _SEQUENCE_SIZE
@@ -659,11 +751,15 @@ class CryptoContext:
         return self._get_cached_key(ciphertext[salt_start:salt_end])
 
     def _version_for_mode(self) -> bytes:
+        """Return the high-performance wire version for the selected cipher."""
+
         if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
             return _HIGH_PERFORMANCE_CHACHA_VERSION
         return _HIGH_PERFORMANCE_AES_VERSION
 
     def _get_session_key(self, session_id: bytes, version: bytes) -> bytes:
+        """Return the active session key, deriving it only when necessary."""
+
         active_key = self._active_session_key
         if (
             self._active_session_id == session_id
@@ -690,6 +786,8 @@ class CryptoContext:
     def _session_key_for_ciphertext(
         self, ciphertext: bytes, version: bytes
     ) -> Optional[bytes]:
+        """Validate a payload session ID and return its cached session key."""
+
         session_id_start = len(version)
         session_id_end = session_id_start + _SESSION_ID_SIZE
         if len(ciphertext) < session_id_end:
@@ -706,6 +804,8 @@ class CryptoContext:
         sequence_number: Optional[int] = None,
         aad: bytes = b"",
     ) -> bytes:
+        """Select the configured wire format and encrypt one message."""
+
         if self.high_performance:
             session_id = self.session_id
             if session_id is None:
@@ -752,6 +852,8 @@ class CryptoContext:
         *,
         aad: bytes = b"",
     ) -> str:
+        """Dispatch payload parsing according to its authenticated version."""
+
         version = ciphertext[:3]
         if version == _HIGH_PERFORMANCE_AES_VERSION:
             if not self.high_performance:
@@ -855,11 +957,40 @@ class CryptoContext:
         sequence_number: Optional[int] = None,
         aad: bytes = b"",
     ) -> bytes:
+        """Encrypt a message using this context's configured wire format.
+
+        Args:
+            plaintext: UTF-8 text to encrypt.
+            sequence_number: Required for replay protection and session mode.
+            aad: Additional authenticated data, not included in the plaintext.
+
+        Returns:
+            A versioned FC3-FC8 ciphertext payload.
+
+        Raises:
+            ValueError: If the sequence number is missing or invalid, or if
+                the context configuration is invalid.
+        """
+
         if self.replay_protection and not self.high_performance:
             sequence_number = _require_sequence_number(sequence_number)
         return self._encrypt(plaintext, sequence_number=sequence_number, aad=aad)
 
     def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
+        """Authenticate and decrypt an FC2-FC8 payload for this context.
+
+        Args:
+            ciphertext: Versioned ciphertext returned by ``encrypt``.
+            aad: Additional authenticated data supplied during encryption.
+
+        Returns:
+            The decrypted UTF-8 plaintext.
+
+        Raises:
+            ValueError: If the payload is malformed, unauthenticated, uses an
+                incompatible format, or is a replay.
+        """
+
         return self._decrypt(ciphertext, aad=aad)
 
     def clear_cache(self) -> None:
@@ -881,7 +1012,28 @@ def encrypt(
     prime: int = DEFAULT_PRIME,
     cipher_mode: CipherMode = CipherMode.AES_GCM,
 ) -> bytes:
-    """Encrypt plaintext with AES-GCM or ChaCha20-Poly1305 and authenticate it in one operation."""
+    """Encrypt plaintext with a stateless authenticated payload format.
+
+    AES-GCM produces FC3 data and ChaCha20-Poly1305 produces FC5 data. Use
+    ``CryptoContext`` when replay protection or FC7/FC8 session mode is needed.
+
+    Args:
+        plaintext: UTF-8 text to encrypt.
+        password: Password input for the Fibonacci-based KDF.
+        salt: Public caller-provided context required during decryption.
+        pepper: Secret deployment value of at least 32 UTF-8 bytes.
+        iterations: Number of Fibonacci KDF rounds.
+        prime: Positive modulus used by the Fibonacci arithmetic.
+        cipher_mode: AES-GCM or ChaCha20-Poly1305.
+
+    Returns:
+        A versioned FC3 or FC5 ciphertext payload.
+
+    Raises:
+        ValueError: If credentials, KDF parameters, or the cipher mode are
+            invalid.
+    """
+
     _validate_pepper(pepper)
     _validate_kdf_parameters(iterations, prime)
     _validate_cipher_mode(cipher_mode)
@@ -902,7 +1054,26 @@ def decrypt(
     iterations: int = 128,
     prime: int = DEFAULT_PRIME,
 ) -> str:
-    """Authenticate and decrypt FC3/FC5, legacy FC2, or context-managed FC7/FC8 data."""
+    """Authenticate and decrypt a stateless FC2-FC6 payload.
+
+    FC7/FC8 session payloads carry context-specific state and must be decrypted
+    with ``CryptoContext.decrypt`` instead of this stateless function.
+
+    Args:
+        ciphertext: Versioned FC2, FC3, FC4, FC5, or FC6 payload.
+        password: Password input used during encryption.
+        salt: The same caller-provided context used during encryption.
+        pepper: The same secret deployment value used during encryption.
+        iterations: Number of Fibonacci KDF rounds used during encryption.
+        prime: Positive modulus used during encryption.
+
+    Returns:
+        The authenticated UTF-8 plaintext.
+
+    Raises:
+        ValueError: If the payload is malformed or authentication fails.
+    """
+
     _validate_pepper(pepper)
     _validate_kdf_parameters(iterations, prime)
     version = ciphertext[:3]

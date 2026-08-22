@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 def _encode_fields(*values: str) -> bytes:
+    """Encode text fields with lengths so concatenation is unambiguous."""
+
     encoded = bytearray()
     for value in values:
         field = value.encode("utf-8")
@@ -72,6 +74,8 @@ def _derive_legacy_fc3_key(
 
 
 def _validate_kdf_parameters(iterations: int, prime: int) -> None:
+    """Validate the iteration count and positive Fibonacci modulus."""
+
     if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
         raise ValueError("iterations must be a positive integer")
     if not isinstance(prime, int) or isinstance(prime, bool) or prime <= 1:
@@ -85,12 +89,28 @@ def derive_key(
     iterations: int = 128,
     prime: int = DEFAULT_PRIME,
 ) -> int:
+    """Derive a 256-bit integer key using the Fibonacci-based KDF.
+
+    ``iterations`` controls the amount of KDF work, not the entropy of the
+    output. Increasing it can make password guessing more expensive, but does
+    not turn this custom KDF into a memory-hard password KDF. The default is
+    selected for the package's latency-oriented use cases.
+
+    Args:
+        password: Password input for the KDF.
+        salt: Caller-provided public context.
+        pepper: Secret deployment value of at least 32 UTF-8 bytes.
+        iterations: Positive number of Fibonacci rounds.
+        prime: Integer modulus greater than one.
+
+    Returns:
+        The XOR-reduced Fibonacci value. With the default 256-bit prime it
+        fits in the 32-byte key representation used by the cipher layer.
+
+    Raises:
+        ValueError: If the pepper or KDF parameters are invalid.
     """
-    Derives a cryptographic key using a Fibonacci-based PRNG mechanism.
-    Note: The default iteration count is 128 to balance security and performance.
-    You may increase this value (e.g. 1000) in production for higher entropy,
-    especially on faster machines.
-    """
+
     _validate_kdf_parameters(iterations, prime)
     seed = _derive_seed(password, salt, pepper)
     key = 0
