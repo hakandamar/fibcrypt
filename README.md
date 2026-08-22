@@ -159,27 +159,20 @@ Both `iterations` and `prime` can be overridden explicitly for experiments and b
 
 ## Performance
 
-On the development benchmark machine (Python 3.14, Apple Silicon, **with gmpy2**), v1.1.2 measured approximately:
+On the development benchmark machine (Python 3.14, Apple Silicon), the release comparison is:
 
-| Configuration | Encrypt (16 B) | Decrypt (16 B) | Total |
-| --- | ---: | ---: | ---: |
-| **Default (256-bit, 128 iters)** | 16.6 ms | 16.7 ms | **33.3 ms** |
-| ChaCha20-Poly1305 | 16.5 ms | 16.6 ms | 33.1 ms |
+| Payload | Operation | v1.0.0 | v1.1.2 (pure Python) | v1.1.2 (with gmpy2) |
+| --- | --- | ---: | ---: | ---: |
+| 16 B | Encrypt | 67.8 ms | 33.097 ms | 16.618 ms |
+| 16 B | Decrypt | 68.4 ms | 33.529 ms | 16.693 ms |
+| 1 KiB | Encrypt | 68.5 ms | 33.136 ms | 16.518 ms |
+| 1 KiB | Decrypt | 69.0 ms | 32.490 ms | 16.562 ms |
+| 1 MiB | Encrypt | 73.4 ms | 39.335 ms | 22.765 ms |
+| 1 MiB | Decrypt | 72.8 ms | 39.811 ms | 22.975 ms |
 
-| Payload | Default Encrypt | Default Decrypt |
-| ---: | ---: | ---: |
-| 16 B | 16.6 ms | 16.7 ms |
-| 1 KiB | 16.5 ms | 16.6 ms |
-| 1 MiB | 22.8 ms | 23.0 ms |
+All measurements use the default `iterations=128` and 256-bit prime, with seven samples after one warmup. The v1.0.0 values are rounded values recorded in the v1.0.0 distribution metadata; v1.1.2 values were measured on the same Python 3.14/Apple Silicon environment. The v1.1.2 pure-Python column disables gmpy2, while the final column has gmpy2 enabled.
 
-*Without gmpy2 (pure Python): multiply KDF time by ~4x (encrypt/decrypt ~67 ms default)*
-
-### v1.1.2 Improvements Over v1.1.1
-
-| Metric | v1.1.1 | v1.1.2 (with gmpy2) | Speedup |
-| --- | ---: | ---: | ---: |
-| Encrypt (16 B) | 16.6 ms | 16.6 ms | ~1x |
-| Decrypt (16 B) | 16.6 ms | 16.7 ms | ~1x |
+The comparison is performance-oriented, not a wire-format comparison: v1.0.0 uses authenticated `FC2` AES-CBC/HMAC, while v1.1.2 uses authenticated `FC3` AES-GCM. Relative to v1.0.0, v1.1.2 is approximately 1.8-2.1x faster without gmpy2 and 3.2-4.2x faster with gmpy2.
 
 These are reference measurements, not performance guarantees. Benchmark the target edge hardware before deployment.
 
