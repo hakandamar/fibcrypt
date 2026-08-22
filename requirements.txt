@@ -1,0 +1,2 @@
+setuptools>=65.0.0
+pycryptodomex>=3.22.0
