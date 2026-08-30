@@ -6,7 +6,7 @@
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-**Latest version:** `v1.2.0` · **Tests:** `35 passed` · **Coverage:** `83%`
+**Latest version:** `v1.2.0` · **Tests:** `61 passed` · **Coverage:** `96%`
 
 `fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
 with authenticated encryption.
