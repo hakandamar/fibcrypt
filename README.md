@@ -6,12 +6,38 @@
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
+**Latest version:** `v1.2.0` · **Tests:** `35 passed` · **Coverage:** `83%`
+
 `fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
 with authenticated encryption.
 
 It is designed for applications that need many low-latency encryption/decryption operations and want to evaluate an
 alternative, transparent cryptographic construction. It is **experimental cryptographic software**, not a replacement
 for Argon2, scrypt, or other independently reviewed password KDFs.
+
+## Table of Contents
+
+- [Project Status](#project-status)
+- [Articles](#articles)
+- [What It Provides](#what-it-provides)
+- [Security Model](#security-model)
+  - [Optional Replay Protection](#optional-replay-protection)
+  - [Opt-In High-Performance Session Mode](#opt-in-high-performance-session-mode)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Using ChaCha20-Poly1305 (for non-AES-NI edge devices)](#using-chacha20-poly1305-for-non-aes-ni-edge-devices)
+  - [Using CryptoContext for Repeated Decryptions (Key Caching)](#using-cryptocontext-for-repeated-decryptions-key-caching)
+- [Parameters](#parameters)
+- [KDF Comparison](#kdf-comparison)
+- [Performance](#performance)
+  - [v1.1.2 vs v1.2.0 High-Performance Session Benchmark](#v112-v120-high-performance-session-benchmark)
+  - [PyPI 0.1.5 vs v1.1.2](#pypi-015-v112)
+- [Security Improvements](#security-improvements)
+- [Statistical Testing](#statistical-testing)
+- [Upgrading From 0.1.5](#upgrading-from-015)
+- [Development](#development)
+- [Security](#security)
+- [License](#license)
 
 ## Project Status
 
