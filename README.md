@@ -199,7 +199,9 @@ pip install gmpy2
 
 ## Usage
 
-Set the pepper through a secret manager or environment variable. Do not commit it to source control.
+Set the pepper through a secret manager or environment variable. Do not commit it to source control. In production, keep
+the pepper in a secure secret-management service such as Azure Key Vault; for high-assurance deployments, an HSM v3
+backing with FIPS 140-3 Level 3 certification is recommended.
 
 ```bash
 export FIBCRYPT_PEPPER="your-long-random-deployment-secret"
