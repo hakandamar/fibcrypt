@@ -1,5 +1,29 @@
 # Benchmark Results
 
+## v1.2.1 KDF Chain (local run)
+
+- Date: 2026-09-12
+- Python: 3.14.7
+- Platform: macOS 26.6.2, arm64 (Apple Silicon)
+- `gmpy2`: 2.3.1
+- Command: `PYTHONPATH=. .venv/bin/python scripts/bench_v1_2_1.py --samples 7 --warmup 1`
+- Measurement: median wall-clock time via `time.perf_counter()`; seven timed samples after one warmup
+- Inputs: fixed `TEST_ONLY` synthetic credentials; sensitive values and payloads were not printed
+
+| Operation | Median |
+| --- | ---: |
+| `derive_key(iterations=128)` | 0.269 ms |
+| `derive_key(iterations=512)` | 0.295 ms |
+| `derive_key(iterations=2048)` | 0.429 ms |
+| FC3 encrypt / decrypt | 0.304 / 0.305 ms |
+| FC5 encrypt / decrypt | 0.287 / 0.301 ms |
+| FC4 encrypt / decrypt | 0.297 / 0.034 ms |
+| FC6 encrypt / decrypt | 0.293 / 0.022 ms |
+| FC7 session setup / encrypt / decrypt | 0.282 / 0.025 / 0.035 ms |
+| FC8 session setup / encrypt / decrypt | 0.267 / 0.013 / 0.020 ms |
+
+These are local Apple Silicon results only; they are not x86 or cross-platform performance claims.
+
 ## v1
 
 - Date: 2026-08-22

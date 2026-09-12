@@ -19,7 +19,7 @@ The result depends on the attacker scenario:
 | --- | --- |
 | Ciphertext, password, salt, and pepper | Normal decryption is possible; this is not a cryptanalytic break. |
 | Ciphertext only, with password and pepper unavailable | No practical key-recovery method was demonstrated in this analysis. |
-| Ciphertext, known pepper, and weak/guessable password | Dictionary guessing may be practical; the measured cost was about 59 KDF candidates/second on the test machine. |
+| Ciphertext, known pepper, and weak/guessable password | Dictionary guessing may be practical; the v1.2.0 historical baseline was about 59 KDF candidates/second on that test machine. v1.2.1 changes this rate substantially; see the platform-dependent benchmark. |
 | Ciphertext alongside a file that also stores the credentials | The ciphertext is trivially decryptable because the required inputs are present. |
 
 The salt, session ID, direction, and sequence number are not substitutes for the password and secret pepper. The FC7
@@ -200,7 +200,9 @@ Fibonacci seeds.
 ### Known-pepper KDF cost
 
 With the synthetic password, salt, and pepper known to the benchmark, seven KDF calls after two warmups took
-approximately `17.0 ms` each, or about `59 candidates/second`, with `gmpy2` enabled on the development machine.
+approximately `17.0 ms` each, or about `59 candidates/second`, with `gmpy2` enabled on the development machine. This
+is a v1.2.0 historical baseline, not a v1.2.1 result. The v1.2.1 chain optimization changes the guessing rate; its
+benchmark is platform-, Python-, `gmpy2`-, and load-dependent and must be measured on the target system.
 
 The KDF is latency-oriented rather than memory-hard; `iterations=128` is a fixed work factor for this benchmark.
 Hardware, Python version, `gmpy2`, parallelism, and attacker implementation affect the measured rate.

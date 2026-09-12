@@ -3,3 +3,6 @@ include CHANGELOG.md
 include LICENSE
 include README.md
 include SECURITY.md
+include UPGRADING_FROM_0_1_5.md
+include scripts/bench_v1_2_1.py
+include tests/v1_2_0_ciphertexts.json

@@ -6,7 +6,7 @@
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-**Latest version:** `v1.2.0` · **Tests:** `61 passed` · **Coverage:** `96%`
+**Latest version:** `v1.2.1` · **Tests:** `309 passed` · **Coverage:** `96%`
 
 `fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
 with authenticated encryption.
@@ -30,11 +30,12 @@ for Argon2, scrypt, or other independently reviewed password KDFs.
 - [Parameters](#parameters)
 - [KDF Comparison](#kdf-comparison)
 - [Performance](#performance)
+  - [v1.2.1 KDF chain benchmark](#v121-kdf-chain-benchmark)
+  - [v1.2.0 vs v1.2.1 Performance Benchmark](#v120-v121-performance-benchmark)
   - [v1.1.2 vs v1.2.0 High-Performance Session Benchmark](#v112-v120-high-performance-session-benchmark)
-  - [PyPI 0.1.5 vs v1.1.2](#pypi-015-v112)
 - [Security Improvements](#security-improvements)
 - [Statistical Testing](#statistical-testing)
-- [Upgrading From 0.1.5](#upgrading-from-015)
+- [Upgrading From 0.1.5](UPGRADING_FROM_0_1_5.md)
 - [Development](#development)
 - [Security](#security)
 - [License](#license)
@@ -64,7 +65,8 @@ production or regulated environment. See [CHANGELOG.md](CHANGELOG.md) for releas
 - Optional `FC4` sequence-number binding and in-process replay protection
 - Opt-in `FC7`/`FC8` session mode for high-throughput traffic
 - **Thread-safe bounded key caching** in `CryptoContext` for repeated decryptions
-- **gmpy2 acceleration** (optional, with pure Python fallback) for ~4x KDF speedup
+- **Optional `gmpy2` acceleration** (the v1.2.1 chain is correct without it; any
+  remaining benefit is a platform-dependent micro-optimization)
 
 ## Security Model
 
@@ -176,7 +178,8 @@ application source, test configuration, logs, or the payload.
 Important limitations:
 
 - The Fibonacci KDF is custom and has not received an independent cryptographic audit.
-- `iterations=128` is selected for latency, not as a claim of equivalence to a memory-hard password KDF.
+- `iterations=128` is selected for latency, not as a claim of equivalence to a memory-hard password KDF. It remains the
+  compatibility default; new deployments should use `iterations=2048` on both endpoints.
 - Weak or reused passwords remain vulnerable to dictionary attacks if the attacker also knows or can guess the salt and
   obtains the pepper.
 - The pepper must be managed as a deployment secret and contain at least 32 bytes. If an attacker compromises the
@@ -189,10 +192,11 @@ Important limitations:
 pip install fibcrypt
 ```
 
-**Optional: gmpy2 acceleration** (recommended for ~4x KDF speedup):
+**Optional: gmpy2 acceleration** (not required by the v1.2.1 chain):
 
 ```bash
 pip install fibcrypt[gmpy2]
+# It may provide a small, platform-dependent micro-gain.
 # or
 pip install gmpy2
 ```
@@ -268,7 +272,8 @@ The default public API uses:
 
 Both `iterations` and `prime` can be overridden explicitly for experiments and benchmarks. `iterations` must be positive
 and `prime` must be greater than one. Changing these values changes the derived keys, so the parameters must remain
-consistent between encryption and decryption.
+consistent between encryption and decryption. Keep `128` for existing deployments; for a new deployment, configure both
+endpoints with `iterations=2048`.
 
 ## KDF Comparison
 
@@ -284,7 +289,7 @@ as password-based key derivation functions, not the complete encryption protocol
 | GPU/ASIC cost model | CPU-oriented arithmetic with little memory pressure | Memory bandwidth and capacity are part of the attacker cost | Memory bandwidth and sequential ROMix work are part of the attacker cost |
 | Salt and secret input | Caller salt plus per-payload/session context; deployment pepper is required and kept secret | Unique public salt; optional secret value can be supplied by an integration | Unique public salt; a pepper requires an application-level wrapper |
 | Output | 256-bit key material consumed by `FC3`-`FC8` authenticated formats | Variable-length tag/key output | Variable-length derived key output |
-| Project measurement | About 17 ms per KDF and 59 known-pepper candidates/second with `gmpy2` on the development machine | Not benchmarked in this project; cost depends on `m`, `t`, `p`, and hardware | Not benchmarked in this project; cost depends on `N`, `r`, `p`, and hardware |
+| Project measurement | v1.2.0 historical baseline: about 17 ms per KDF and 59 known-pepper candidates/second with `gmpy2`; v1.2.1 is platform-dependent and measured by the benchmark script | Not benchmarked in this project; cost depends on `m`, `t`, `p`, and hardware | Not benchmarked in this project; cost depends on `N`, `r`, `p`, and hardware |
 | Best fit | Latency-sensitive edge encryption where low memory use and a deployment pepper are acceptable design choices | Password storage and password-derived keys where memory can be deliberately allocated; Argon2id is the standard variant to select | Password-derived keys where a mature memory-hard construction and existing scrypt ecosystem are preferred |
 | Main tradeoff | Low memory and low latency, with less attacker-cost leverage from memory hardness | Higher memory and setup cost, requiring per-service resource budgeting | Higher memory and setup cost, with more parameters to tune for the target platform |
 
@@ -298,6 +303,47 @@ Reference specifications: [RFC 9106 (Argon2)](https://www.rfc-editor.org/rfc/rfc
 [RFC 7914 (scrypt)](https://www.rfc-editor.org/rfc/rfc7914.html).
 
 ## Performance
+
+### v1.2.1 KDF chain benchmark
+
+v1.2.1 computes the consecutive Fibonacci window with one fast-doubling pass and modular additions. The derived key is
+bit-for-bit identical to v1.2.0, so no ciphertext or wire-format migration is required. The benchmark is reproducible
+with safe synthetic inputs and reports the local platform and optional `gmpy2` status:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/bench_v1_2_1.py --samples 7 --warmup 1
+```
+
+The technical-note reference run was on x86_64 Linux with Python 3.12 and `gmpy2`; its numbers are not guarantees for
+other platforms. In that reference, `derive_key(iterations=128)` was about `0.205 ms` and `iterations=2048` about
+`0.37 ms`. The latter is approximately 50x lower latency than the old v1.2.0/128 implementation (~19.4 ms), while it
+is approximately 1.8x the optimized v1.2.1/128 cost. This is a latency comparison, not a claim that 2048 is 50x
+stronger. The chain optimization also accelerates known-pepper offline guessing; measure and choose the work factor
+accordingly, and prefer a memory-hard KDF for password storage.
+
+The `gmpy2` dependency is no longer necessary for correctness or for the main v1.2.1 speedup. It remains optional for a
+small, platform-dependent micro-gain. In session mode, per-message encryption/decryption remains unchanged; only the
+one-time session setup KDF becomes faster.
+
+#### v1.2.1 result by FC format
+
+The following summarizes the v1.2.0 reference measurements and the v1.2.1
+chain-optimized results. Values are approximate and hardware-dependent:
+
+| Format / path | v1.2.0 | v1.2.1 | Approx. change |
+| --- | ---: | ---: | ---: |
+| FC2 legacy | unchanged | unchanged | ~1x |
+| FC3 AES encrypt/decrypt | ~19.8 ms | ~0.25–0.30 ms | ~70–79x faster |
+| FC4 replay AES | ~19.9 ms | ~0.25–0.30 ms | ~66–80x faster |
+| FC5 ChaCha encrypt/decrypt | ~19.8 ms | ~0.24–0.29 ms | ~68–83x faster |
+| FC6 replay ChaCha | ~19.9 ms | ~0.25–0.29 ms | ~68–80x faster |
+| FC7 session setup | ~16.6–19 ms | ~0.28 ms | ~59–68x faster |
+| FC8 session setup | ~16.6–19 ms | ~0.27 ms | ~62–70x faster |
+| FC7/FC8 per-message operations | ~0.01–0.04 ms | ~0.01–0.04 ms | Essentially unchanged |
+
+FC2 deliberately keeps its legacy derivation path. FC3–FC6 numbers come from
+the x86_64 reference run; current Apple Silicon measurements are recorded in
+[`bench_results.md`](bench_results.md).
 
 On the development benchmark machine (Python 3.14, Apple Silicon), the release comparison is:
 
@@ -320,6 +366,27 @@ and 3.2-4.2x faster with gmpy2.
 
 These are reference measurements, not performance guarantees. Benchmark the target edge hardware before deployment.
 
+### v1.2.0 vs v1.2.1 Performance Benchmark
+
+Both columns below use the same Apple Silicon environment, Python 3.14, `gmpy2`,
+explicit session IDs, and replay protection. v1.2.0 values are the existing
+reference measurements; v1.2.1 values were remeasured with seven samples after
+one warmup. Session setup improved separately from the per-message operations:
+approximately `16.6 ms` in v1.2.0 versus `0.27–0.28 ms` in v1.2.1.
+
+| Cipher | Payload | v1.2.0 Encrypt | v1.2.1 Encrypt | Relative | v1.2.0 Decrypt | v1.2.1 Decrypt | Relative |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AES-GCM / FC7 | 16 B | 0.027 ms | 0.026 ms | 1.04x | 0.031 ms | 0.036 ms | 0.86x |
+| AES-GCM / FC7 | 1 KiB | 0.030 ms | 0.031 ms | 0.97x | 0.036 ms | 0.038 ms | 0.95x |
+| AES-GCM / FC7 | 1 MiB | 6.207 ms | 6.436 ms | 0.96x | 6.257 ms | 6.639 ms | 0.94x |
+| ChaCha20-Poly1305 / FC8 | 16 B | 0.012 ms | 0.013 ms | 0.92x | 0.019 ms | 0.021 ms | 0.90x |
+| ChaCha20-Poly1305 / FC8 | 1 KiB | 0.014 ms | 0.014 ms | 1.00x | 0.022 ms | 0.023 ms | 0.96x |
+| ChaCha20-Poly1305 / FC8 | 1 MiB | 2.075 ms | 2.278 ms | 0.91x | 2.102 ms | 2.340 ms | 0.90x |
+
+The per-message session path is therefore effectively unchanged; small ratio
+differences are normal benchmark noise and payload/AEAD costs. The v1.2.1
+benefit is concentrated in the one-time KDF/session setup.
+
 ### v1.1.2 vs v1.2.0 High-Performance Session Benchmark
 
 With gmpy2 enabled, explicit session ID, and replay protection, v1.2.0's `CryptoContext(high_performance=True)` derives
@@ -334,22 +401,6 @@ messages use the session key:
 | ChaCha20-Poly1305 / FC8 | 16 B | 16.363 ms | 0.012 ms | 1364x | 16.328 ms | 0.019 ms | 859x |
 | ChaCha20-Poly1305 / FC8 | 1 KiB | 16.350 ms | 0.014 ms | 1168x | 16.602 ms | 0.022 ms | 755x |
 | ChaCha20-Poly1305 / FC8 | 1 MiB | 18.372 ms | 2.075 ms | 8.9x | 18.282 ms | 2.102 ms | 8.7x |
-
-### PyPI 0.1.5 vs v1.1.2
-
-The following comparison was run on the same machine against the published PyPI `0.1.5` wheel and the v1.1.2
-implementation. The legacy release used its original `iterations=20` default and unauthenticated AES-CBC format; v1.1.2
-uses `iterations=128`, full-seed derivation, a secret pepper, random salt, and authenticated encryption. This is
-therefore a release comparison, not an equal-security-configuration comparison.
-
-| Payload | 0.1.5 Encrypt | v1.1.2 Encrypt | Speedup | 0.1.5 Decrypt | v1.1.2 Decrypt | Speedup |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 B | 3443 ms | 16.6 ms | 207x | 3446 ms | 16.6 ms | 207x |
-| 1 KiB | 3471 ms | 16.8 ms | 206x | 3497 ms | 16.9 ms | 207x |
-| 1 MiB | 3524 ms | 20.2 ms | 174x | 3507 ms | 19.8 ms | 177x |
-
-The legacy values used three timed samples after one warmup; v1.1.2 values used seven timed samples after one warmup.
-Values are rounded and will vary by hardware.
 
 ## Security Improvements
 
@@ -368,7 +419,7 @@ Compared with the original PyPI `fibcrypt 0.1.5` release, `fibcrypt 1.2.0` inclu
 - Optional `FC4`/`FC6` sequence-number binding and in-process replay protection
 - Opt-in `FC7`/`FC8` session-key encryption for high-throughput traffic
 - **Thread-safe bounded key caching** in `CryptoContext` for repeated decryptions
-- **gmpy2-accelerated Fibonacci arithmetic** with pure Python fallback
+- **Optional gmpy2-accelerated Fibonacci arithmetic** with pure Python fallback
 - Approximately 174-207x lower measured latency than the published `0.1.5` artifact on the benchmark machine
 
 ## Statistical Testing
@@ -403,27 +454,7 @@ PYTHONPATH=. .venv/bin/python scripts/crypto_analysis.py
 
 The report is exploratory and does not establish cryptographic security or replace an independent audit.
 
-## Upgrading From 0.1.5
-
-Version 1.2.0 changes neither the current `FC3`/`FC4` wire format nor the v1.1.1 KDF for default payloads. It also
-restores decryption of pre-HKDF v1.1.0 `FC3`/`FC4` payloads and adds opt-in `FC7`/`FC8` session mode:
-
-1. Provision one high-entropy pepper through a secret manager or environment variable and make it available to every
-   service that encrypts or decrypts the shared data.
-2. Update calls from `encrypt(plaintext, password, salt)` and `decrypt(ciphertext, password, salt)` to include the same
-   pepper value.
-3. Keep the original `0.1.5` runtime available while migrating existing data.
-4. Decrypt each `0.1.5` ciphertext with the original package and credentials, then re-encrypt it with v1.2.0 and the
-   managed pepper.
-5. Verify the migrated plaintext or application record before replacing the old ciphertext.
-6. Test the migration on a backup or staging copy before rolling it out to production.
-
-The v0.1.5 format was `iv + ciphertext` and used different key derivation defaults. It has no authentication tag and is
-not readable by the `FC2`/`FC3`/`FC4`/`FC5`/`FC6`/`FC7`/`FC8` decoder. Existing authenticated `FC2` payloads remain
-decryptable, while new default calls produce `FC3` AES-GCM payloads. Replay-protected calls produce `FC4` payloads.
-ChaCha20 calls produce `FC5`/`FC6`. High-performance session calls produce `FC7`/`FC8`. A replay-protected
-`CryptoContext` requires `FC4` or `FC6` input and rejects stateless payloads. Losing the pepper makes ciphertexts
-unrecoverable.
+For upgrade details from 0.1.5, see the dedicated [upgrade guide](UPGRADING_FROM_0_1_5.md).
 
 ## Development
 

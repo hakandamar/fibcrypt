@@ -1,0 +1,78 @@
+{
+  "format": "fibcrypt v1.2.0 deterministic TEST_ONLY fixtures",
+  "generator": "dist/fibcrypt-1.2.0-py3-none-any.whl",
+  "generation": "v1.2.0 private AEAD helpers with fixed salts, nonces, and session metadata",
+  "credentials": {
+    "password": "TEST_ONLY-v1.2.0-password",
+    "salt": "TEST_ONLY-v1.2.0-salt",
+    "pepper": "TEST_ONLY-v1.2.0-pepper-with-at-least-32-bytes"
+  },
+  "vectors": {
+    "FC3": {
+      "ciphertext": "4643331010101010101010101010101010101020202020202020202020202052b8fd8f8ab53632d96ee5a7fd84f54d3337d833beb051be51c4251d8d12237ef597485041bab75f6d5cb9f9e3dc054bbd8ca9bff723a60104ce43e3da1fe5afe68f",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "stateless",
+      "cipher": "aes-gcm"
+    },
+    "FC4": {
+      "ciphertext": "4643340000000000000007111111111111111111111111111111112121212121212121212121212f896354c45d063b1d71eeb1e105a0b30b4fc09acb7d774f1e7a4f847d5a6fee493f16e09aca669b031a28cfcf8d95a1971d3f935676bf93aa49324a737e21c11a8e",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "544553545f4f4e4c592f6161640076312e322e30",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "context",
+      "cipher": "aes-gcm",
+      "replay_protection": true,
+      "sequence_number": 7
+    },
+    "FC5": {
+      "ciphertext": "46433512121212121212121212121212121212222222222222222222222222c601532c21c426a1939122e3a7cf2f1893242d66df656a720597fa6db954fde7efd960c4e7349f8ea18ee945fdb2909632cf5cbaa7fa004fba0ab3d6e9b26d852a16",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "stateless",
+      "cipher": "chacha20-poly1305"
+    },
+    "FC6": {
+      "ciphertext": "464336000000000000000913131313131313131313131313131313232323232323232323232323477f4db6a43790d8272359ff78ed678364b9a8cef99a61741b2394a9cafc2d3555e7cf76fb0b4b712e3840dabb71d42b2ce5747e042aa05305f2325b607296116b77",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "544553545f4f4e4c592f6161640076312e322e30",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "context",
+      "cipher": "chacha20-poly1305",
+      "replay_protection": true,
+      "sequence_number": 9
+    },
+    "FC7": {
+      "ciphertext": "46433731313131313131313131313131313131000000000000000b751d71b44b2b30baf1c4c56730c5fc15a1840726d0ff0e7cf6a59dee36f3bdf713457d2f7d2c7677931c00e5beb98da4da88806403a972e0c32f19010279754058f5",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "544553545f4f4e4c592f6161640076312e322e30",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "session",
+      "cipher": "aes-gcm",
+      "replay_protection": true,
+      "session_id": "31313131313131313131313131313131",
+      "sequence_number": 11,
+      "direction": "uplink"
+    },
+    "FC8": {
+      "ciphertext": "46433832323232323232323232323232323232000000000000000d34c4439114e14931b1c739905981e64786c97bb7439bc6e659e600d82bf6eb21c6ec809191e63ca29f084948ce4736122c26c3ba686d4df6bca59a1061c719146e50",
+      "plaintext": "TEST_ONLY v1.2.0 fixture payload — deterministic",
+      "aad": "544553545f4f4e4c592f6161640076312e322e30",
+      "iterations": 128,
+      "prime": "115792089237316195423570985008687907853269984665640564039457584007908834671663",
+      "mode": "session",
+      "cipher": "chacha20-poly1305",
+      "replay_protection": true,
+      "session_id": "32323232323232323232323232323232",
+      "sequence_number": 13,
+      "direction": "uplink"
+    }
+  }
+}

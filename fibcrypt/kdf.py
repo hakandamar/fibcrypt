@@ -3,7 +3,7 @@ import hmac
 import logging
 import struct
 
-from fibcrypt.fib import fibonacci_mod
+from fibcrypt.fib import fibonacci_mod, fibonacci_xor_chain
 from fibcrypt.utils import hash_to_int
 
 DEFAULT_PRIME = 2**256 - 2**32 - 977
@@ -113,8 +113,6 @@ def derive_key(
 
     _validate_kdf_parameters(iterations, prime)
     seed = _derive_seed(password, salt, pepper)
-    key = 0
-    for i in range(iterations):
-        key ^= fibonacci_mod(seed + i, prime)
+    key = fibonacci_xor_chain(seed, iterations, prime)
     logger.debug("KDF completed: iterations=%d", iterations)
     return key
