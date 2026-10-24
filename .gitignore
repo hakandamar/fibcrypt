@@ -175,3 +175,6 @@ crypto_analysis.md
 .ruff_cache/
 .DS_Store
 Thumbs.db
+
+# Local agent task state (orchestrator scratch)
+.agent_cache/
