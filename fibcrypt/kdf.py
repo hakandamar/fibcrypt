@@ -8,6 +8,13 @@ from fibcrypt.utils import hash_to_int
 
 DEFAULT_PRIME = 2**256 - 2**32 - 977
 MIN_PEPPER_BYTES = 32
+
+# Recommended work factor for NEW encryption setups. The historical default of
+# 128 iterations stays for backward compatibility with existing ciphertexts;
+# decryption must always keep the iteration count a ciphertext was created
+# with and never "upgrade" it.
+RECOMMENDED_ITERATIONS = 2048
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,7 +101,9 @@ def derive_key(
     ``iterations`` controls the amount of KDF work, not the entropy of the
     output. Increasing it can make password guessing more expensive, but does
     not turn this custom KDF into a memory-hard password KDF. The default is
-    selected for the package's latency-oriented use cases.
+    selected for the package's latency-oriented use cases; new setups should
+    pass :data:`RECOMMENDED_ITERATIONS` (2048) instead, while decryption must
+    keep the iteration count its ciphertext was created with.
 
     Args:
         password: Password input for the KDF.

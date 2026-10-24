@@ -1,20 +1,30 @@
-"""Regression tests for the v1.2.2 security-review remediations.
+"""Regression tests for the security-review remediations.
 
 Covers F-1 (session-mode sender sequence monotonicity), F-2 (unguarded
-FC4/FC6 decryption warning and ``strict_replay``), and F-3 (default
-direction warning for high-performance contexts).
+FC4/FC6 decryption warning and ``strict_replay``), F-3 (default direction
+warning for high-performance contexts), F-4 (pepper commitment in key-cache
+keys and cache lifetime), F-5 (bounded repeat-suppression of failed FC3/FC4
+legacy KDF fallbacks), and F-6 (``RECOMMENDED_ITERATIONS`` guidance and the
+one-time low-iterations warning on new-encryption entry points).
 """
 
+import hashlib
+import hmac
 import logging
+import os
 import threading
+from typing import Any, Iterator
 
 import pytest
+from Cryptodome.Cipher import AES
 
+from fibcrypt import crypto_utils
 from fibcrypt.crypto_utils import (
     CipherMode,
     CryptoContext,
     decrypt,
 )
+from fibcrypt.kdf import DEFAULT_PRIME, RECOMMENDED_ITERATIONS
 
 PEPPER = "deployment-pepper-with-at-least-32-bytes"
 SESSION_ID = b"\x01" * 16
@@ -304,3 +314,294 @@ def test_non_high_performance_context_does_not_warn_about_direction(
     assert not any(
         "default direction" in record.getMessage() for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures and helpers for F-4/F-5/F-6
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def reset_security_caches() -> Iterator[None]:
+    """Isolate the process-wide F-5 fallback cache and F-6 warning flag."""
+
+    crypto_utils._reset_failed_legacy_fallback_cache()
+    crypto_utils._reset_low_iterations_warning()
+    yield
+    crypto_utils._reset_failed_legacy_fallback_cache()
+    crypto_utils._reset_low_iterations_warning()
+
+
+def _count_legacy_kdf_calls(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Wrap the legacy FC3 KDF with a call recorder for F-5 assertions."""
+
+    calls: list = []
+    original = crypto_utils._derive_legacy_fc3_encryption_key
+
+    def counting_wrapper(*args: Any, **kwargs: Any) -> bytes:
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        crypto_utils, "_derive_legacy_fc3_encryption_key", counting_wrapper
+    )
+    return calls
+
+
+def _corrupt_final_byte(ciphertext: bytes) -> bytes:
+    """Flip one authentication-tag byte so both keys fail verification."""
+
+    return ciphertext[:-1] + bytes([ciphertext[-1] ^ 0x01])
+
+
+def _make_pre_hkdf_fc3_ciphertext(plaintext: str, pepper: str) -> bytes:
+    """Build a v1.1.0-style FC3 payload that only the legacy fallback opens."""
+
+    random_salt = os.urandom(16)
+    nonce = os.urandom(12)
+    key = crypto_utils._derive_legacy_fc3_encryption_key(
+        "password", "salt", pepper, random_salt, 128, DEFAULT_PRIME
+    )
+    header = b"FC3" + random_salt + nonce
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce, mac_len=16)
+    cipher.update(header)
+    encrypted, tag = cipher.encrypt_and_digest(plaintext.encode("utf-8"))
+    return header + encrypted + tag
+
+
+# ---------------------------------------------------------------------------
+# F-4: pepper commitment in cache keys and cache lifetime
+# ---------------------------------------------------------------------------
+
+
+def _pepper_commitment(pepper: str) -> bytes:
+    return hmac.new(
+        pepper.encode("utf-8"), b"fibcrypt-cache-commitment", hashlib.sha256
+    ).digest()
+
+
+def test_key_cache_stores_pepper_commitment_not_raw_pepper() -> None:
+    context = CryptoContext("password", "salt", PEPPER)
+    ciphertext = context.encrypt("cache me")
+    assert context.decrypt(ciphertext) == "cache me"
+
+    assert context._key_cache
+    for cache_key in context._key_cache:
+        assert PEPPER not in cache_key
+        assert PEPPER.encode("utf-8") not in cache_key
+        assert _pepper_commitment(PEPPER) in cache_key
+
+
+def test_cache_hit_skips_key_rederivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = CryptoContext("password", "salt", PEPPER)
+    ciphertext = context.encrypt("cache me")
+    assert context.decrypt(ciphertext) == "cache me"
+
+    derivations: list = []
+    original = crypto_utils.derive_key
+
+    def counting_derive(*args: Any, **kwargs: Any) -> int:
+        derivations.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(crypto_utils, "derive_key", counting_derive)
+    assert context.decrypt(ciphertext) == "cache me"
+    assert derivations == []
+    assert len(context._key_cache) == 1
+
+
+def test_different_peppers_keep_distinct_commitments_and_keys() -> None:
+    other_pepper = "second-deployment-pepper-with-32-bytes"
+    assert _pepper_commitment(PEPPER) != _pepper_commitment(other_pepper)
+
+    first = CryptoContext("password", "salt", PEPPER)
+    second = CryptoContext("password", "salt", other_pepper)
+    first_payload = CryptoContext("password", "salt", PEPPER).encrypt("first")
+    second_payload = CryptoContext(
+        "password", "salt", other_pepper
+    ).encrypt("second")
+
+    assert first.decrypt(first_payload) == "first"
+    assert second.decrypt(second_payload) == "second"
+    # A cache keyed by the wrong pepper commitment must not accept the other
+    # pepper's payload key.
+    with pytest.raises(ValueError, match="authentication failed"):
+        first.decrypt(second_payload)
+
+
+def test_clear_cache_rederives_and_decrypts_consistently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = CryptoContext("password", "salt", PEPPER)
+    ciphertext = context.encrypt("cache me")
+    assert context.decrypt(ciphertext) == "cache me"
+
+    context.clear_cache()
+    assert context._key_cache == {}
+
+    derivations: list = []
+    original = crypto_utils.derive_key
+
+    def counting_derive(*args: Any, **kwargs: Any) -> int:
+        derivations.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(crypto_utils, "derive_key", counting_derive)
+    assert context.decrypt(ciphertext) == "cache me"
+    assert len(derivations) == 1
+    assert len(context._key_cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# F-5: repeated failed FC3/FC4 legacy KDF fallbacks are suppressed
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_fc3_stateless_repeats_run_legacy_kdf_once(
+    monkeypatch: pytest.MonkeyPatch, reset_security_caches: None
+) -> None:
+    from fibcrypt.crypto_utils import encrypt as stateless_encrypt
+
+    calls = _count_legacy_kdf_calls(monkeypatch)
+    ciphertext = _corrupt_final_byte(
+        stateless_encrypt("payload", "password", "salt", PEPPER)
+    )
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="Ciphertext authentication failed"):
+            decrypt(ciphertext, "password", "salt", PEPPER)
+    assert len(calls) == 1
+
+
+def test_corrupt_fc4_context_repeats_run_legacy_kdf_once(
+    monkeypatch: pytest.MonkeyPatch, reset_security_caches: None
+) -> None:
+    sender = CryptoContext("password", "salt", PEPPER, replay_protection=True)
+    ciphertext = _corrupt_final_byte(sender.encrypt("payload", sequence_number=3))
+    receiver = CryptoContext("password", "salt", PEPPER)
+
+    calls = _count_legacy_kdf_calls(monkeypatch)
+    for _ in range(3):
+        with pytest.raises(ValueError, match="Ciphertext authentication failed"):
+            receiver.decrypt(ciphertext)
+    assert len(calls) == 1
+
+
+def test_valid_pre_hkdf_fc3_payload_still_decrypts(
+    reset_security_caches: None,
+) -> None:
+    ciphertext = _make_pre_hkdf_fc3_ciphertext("old message", PEPPER)
+
+    assert decrypt(ciphertext, "password", "salt", PEPPER) == "old message"
+    # A successful fallback must never be recorded as denied, so repeats keep
+    # working (the legacy key stays derivable on demand).
+    random_salt = ciphertext[3:19]
+    nonce = ciphertext[19:31]
+    assert not crypto_utils._legacy_fallback_denied(random_salt, nonce)
+    assert decrypt(ciphertext, "password", "salt", PEPPER) == "old message"
+
+
+def test_failed_legacy_fallback_cache_is_bounded_fifo(
+    reset_security_caches: None,
+) -> None:
+    size = crypto_utils._FAILED_LEGACY_CACHE_SIZE
+    oldest_salt = b"\x00" * 16
+    oldest_nonce = b"\x00" * 12
+    crypto_utils._remember_failed_legacy_fallback(oldest_salt, oldest_nonce)
+
+    for index in range(1, size + 1):
+        crypto_utils._remember_failed_legacy_fallback(
+            index.to_bytes(16, "big"), index.to_bytes(12, "big")
+        )
+
+    assert len(crypto_utils._failed_legacy_markers) == size
+    # FIFO eviction removed the oldest marker, newest ones remain denied.
+    assert not crypto_utils._legacy_fallback_denied(oldest_salt, oldest_nonce)
+    assert crypto_utils._legacy_fallback_denied(
+        size.to_bytes(16, "big"), size.to_bytes(12, "big")
+    )
+
+
+# ---------------------------------------------------------------------------
+# F-6: RECOMMENDED_ITERATIONS guidance warns once on new-encryption setups
+# ---------------------------------------------------------------------------
+
+
+def _low_iteration_warnings(caplog: pytest.LogCaptureFixture) -> list:
+    return [
+        record
+        for record in caplog.records
+        if "below the recommended" in record.getMessage()
+    ]
+
+
+def test_recommended_iterations_constant_is_exported() -> None:
+    assert RECOMMENDED_ITERATIONS == 2048
+    assert crypto_utils.RECOMMENDED_ITERATIONS == 2048
+    assert "RECOMMENDED_ITERATIONS" in crypto_utils.__all__
+
+
+def test_low_iterations_context_creation_warns_once(
+    caplog: pytest.LogCaptureFixture, reset_security_caches: None
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        CryptoContext("password", "salt", PEPPER)
+        CryptoContext("password", "salt", PEPPER, replay_protection=True)
+        CryptoContext(
+            "password", "salt", PEPPER, cipher_mode=CipherMode.CHACHA20_POLY1305
+        )
+
+    warnings = _low_iteration_warnings(caplog)
+    assert len(warnings) == 1
+    assert "iterations=128" in warnings[0].getMessage()
+
+
+def test_low_iterations_stateless_encrypt_warns_once(
+    caplog: pytest.LogCaptureFixture, reset_security_caches: None
+) -> None:
+    from fibcrypt.crypto_utils import encrypt as stateless_encrypt
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        stateless_encrypt("a", "password", "salt", PEPPER)
+        stateless_encrypt(
+            "b", "password", "salt", PEPPER, cipher_mode=CipherMode.CHACHA20_POLY1305
+        )
+
+    warnings = _low_iteration_warnings(caplog)
+    assert len(warnings) == 1
+    assert "encrypt()" in warnings[0].getMessage()
+
+
+def test_recommended_iterations_setups_do_not_warn(
+    caplog: pytest.LogCaptureFixture, reset_security_caches: None
+) -> None:
+    from fibcrypt.crypto_utils import encrypt as stateless_encrypt
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        CryptoContext("password", "salt", PEPPER, iterations=RECOMMENDED_ITERATIONS)
+        stateless_encrypt(
+            "a", "password", "salt", PEPPER, iterations=RECOMMENDED_ITERATIONS
+        )
+
+    assert _low_iteration_warnings(caplog) == []
+
+
+def test_decrypt_paths_never_warn_about_iterations(
+    caplog: pytest.LogCaptureFixture, reset_security_caches: None
+) -> None:
+    from fibcrypt.crypto_utils import encrypt as stateless_encrypt
+
+    context = CryptoContext("password", "salt", PEPPER)
+    context_payload = context.encrypt("payload")
+    stateless_payload = stateless_encrypt("payload", "password", "salt", PEPPER)
+
+    # Re-arm the one-time flag after setup so only decrypt calls can warn.
+    crypto_utils._reset_low_iterations_warning()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        caplog.clear()
+        assert context.decrypt(context_payload) == "payload"
+        assert decrypt(stateless_payload, "password", "salt", PEPPER) == "payload"
+
+    assert _low_iteration_warnings(caplog) == []

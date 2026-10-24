@@ -3,6 +3,7 @@ import hmac
 import logging
 import os
 import threading
+from collections import OrderedDict
 from enum import Enum
 from typing import Dict, Optional, Tuple
 
@@ -13,11 +14,23 @@ from fibcrypt.fib import fibonacci_mod
 from fibcrypt.kdf import (
     DEFAULT_PRIME,
     MIN_PEPPER_BYTES,
+    RECOMMENDED_ITERATIONS,
     _derive_legacy_fc3_key,
     _validate_kdf_parameters,
     derive_key,
 )
 from fibcrypt.utils import hash_to_int
+
+__all__ = [
+    "CipherMode",
+    "CryptoContext",
+    "ReplayGuard",
+    "decrypt",
+    "encrypt",
+    "int_to_bytes",
+    "DEFAULT_PRIME",
+    "RECOMMENDED_ITERATIONS",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +51,95 @@ _HIGH_PERFORMANCE_AES_VERSION = b"FC7"
 _HIGH_PERFORMANCE_CHACHA_VERSION = b"FC8"
 _SESSION_ID_SIZE = 16
 _KEY_CACHE_SIZE = 128
+
+# F-5 mitigation: FC3/FC4 decryption retries a pre-HKDF legacy key when the
+# current key fails authentication. Corrupted or forged payloads make that
+# retry always fail, so an attacker could re-submit the same bad payload to
+# force a second full KDF per attempt. Failed legacy fallbacks are therefore
+# remembered per payload salt+nonce in this bounded FIFO set, and the legacy
+# KDF is skipped on repeats (the original authentication error is re-raised,
+# so the observable behaviour is unchanged). Successful legacy decryptions are
+# never recorded.
+_FAILED_LEGACY_CACHE_SIZE = 1024
+_FAILED_LEGACY_MARKER_DOMAIN = b"fibcrypt-failed-legacy-fallback"
+_failed_legacy_lock = threading.Lock()
+_failed_legacy_markers: "OrderedDict[bytes, None]" = OrderedDict()
+
+# F-6 doctrine: new encryption setups should use RECOMMENDED_ITERATIONS; the
+# 128 default stays only for compatibility. The warning fires once per process
+# on new-encryption entry points and never on decryption paths.
+_low_iterations_lock = threading.Lock()
+_low_iterations_warned = False
+
+
+def _failed_legacy_marker(random_salt: bytes, nonce: bytes) -> bytes:
+    """Return the bounded-cache marker identifying one payload's legacy retry."""
+
+    return hashlib.sha256(
+        _FAILED_LEGACY_MARKER_DOMAIN + random_salt + nonce
+    ).digest()
+
+
+def _legacy_fallback_denied(random_salt: bytes, nonce: bytes) -> bool:
+    """Report whether the legacy FC3 fallback already failed for this payload."""
+
+    marker = _failed_legacy_marker(random_salt, nonce)
+    with _failed_legacy_lock:
+        return marker in _failed_legacy_markers
+
+
+def _remember_failed_legacy_fallback(random_salt: bytes, nonce: bytes) -> None:
+    """Record a failed legacy FC3 fallback so its KDF is not re-run for free."""
+
+    marker = _failed_legacy_marker(random_salt, nonce)
+    with _failed_legacy_lock:
+        _failed_legacy_markers[marker] = None
+        if len(_failed_legacy_markers) > _FAILED_LEGACY_CACHE_SIZE:
+            _failed_legacy_markers.popitem(last=False)
+
+
+def _reset_failed_legacy_fallback_cache() -> None:
+    """Testing helper: clear the process-wide failed legacy fallback cache."""
+
+    with _failed_legacy_lock:
+        _failed_legacy_markers.clear()
+
+
+def _warn_low_iterations(iterations: int, entry_point: str) -> None:
+    """Warn once per process when a new encryption setup uses a low work factor.
+
+    Decryption paths must never call this: a ciphertext can only be opened
+    with the iteration count it was created with.
+    """
+
+    global _low_iterations_warned
+
+    if iterations >= RECOMMENDED_ITERATIONS:
+        return
+    with _low_iterations_lock:
+        if _low_iterations_warned:
+            return
+        _low_iterations_warned = True
+    logger.warning(
+        "%s is configured with iterations=%d, below the recommended %d; "
+        "the 128 default is kept only for compatibility, so new "
+        "deployments should use iterations=%d on both endpoints. Do not "
+        "change the iterations value of existing ciphertexts; decryption "
+        "must always use the count a ciphertext was created with.",
+        entry_point,
+        iterations,
+        RECOMMENDED_ITERATIONS,
+        RECOMMENDED_ITERATIONS,
+    )
+
+
+def _reset_low_iterations_warning() -> None:
+    """Testing helper: allow the one-time low-iterations warning to fire again."""
+
+    global _low_iterations_warned
+
+    with _low_iterations_lock:
+        _low_iterations_warned = False
 
 
 class CipherMode(Enum):
@@ -517,6 +619,8 @@ def _decrypt_aes_gcm(
         try:
             plaintext = _decrypt_aes_gcm_payload(key, nonce, header, encrypted, tag, aad)
         except ValueError as current_exc:
+            if _legacy_fallback_denied(random_salt, nonce):
+                raise current_exc
             try:
                 legacy_key = _derive_legacy_fc3_encryption_key(
                     password, salt, pepper, random_salt, iterations, prime
@@ -525,6 +629,7 @@ def _decrypt_aes_gcm(
                     legacy_key, nonce, header, encrypted, tag, aad
                 )
             except ValueError:
+                _remember_failed_legacy_fallback(random_salt, nonce)
                 raise current_exc
         if replay_guard is not None and not replay_guard.accept(sequence_number):
             raise ValueError("Replay detected or sequence number outside replay window")
@@ -547,6 +652,8 @@ def _decrypt_aes_gcm(
         try:
             plaintext = _decrypt_aes_gcm_payload(key, nonce, header, encrypted, tag, aad)
         except ValueError as current_exc:
+            if _legacy_fallback_denied(random_salt, nonce):
+                raise current_exc
             try:
                 legacy_key = _derive_legacy_fc3_encryption_key(
                     password, salt, pepper, random_salt, iterations, prime
@@ -555,6 +662,7 @@ def _decrypt_aes_gcm(
                     legacy_key, nonce, header, encrypted, tag, aad
                 )
             except ValueError:
+                _remember_failed_legacy_fallback(random_salt, nonce)
                 raise current_exc
         return plaintext.decode("utf-8")
 
@@ -697,7 +805,11 @@ class CryptoContext:
             pepper: Secret deployment value of at least 32 UTF-8 bytes.
             replay_protection: Enable the in-process sliding replay window.
             replay_window: Number of recent sequence numbers to retain.
-            iterations: Number of Fibonacci KDF rounds.
+            iterations: Number of Fibonacci KDF rounds. New setups should
+                use ``RECOMMENDED_ITERATIONS`` (2048); the 128 default logs a
+                one-time process-wide warning on encryption entry points.
+                Endpoints exchanging existing ciphertexts must keep the value
+                those ciphertexts were created with.
             prime: Positive modulus used by the Fibonacci arithmetic.
             cipher_mode: AES-GCM or ChaCha20-Poly1305.
             high_performance: Use the one-key-per-session FC7/FC8 formats.
@@ -738,6 +850,7 @@ class CryptoContext:
                 )
         elif session_id is not None:
             raise ValueError("session_id requires high_performance=True")
+        _warn_low_iterations(iterations, "CryptoContext")
         self.password = password
         self.salt = salt
         self.pepper = pepper
@@ -751,6 +864,16 @@ class CryptoContext:
         self.session_id = session_id
         self.strict_replay = strict_replay
         self.allow_sequence_reuse = allow_sequence_reuse
+        # F-4 defense-in-depth: the raw pepper string is kept only as the
+        # configured attribute used for key derivation; the derived-key cache
+        # stores this one-way commitment instead so cache inspection (dumps,
+        # reprs, debug tooling) does not expose the deployment secret. The
+        # commitment is derived from the pepper with HMAC-SHA256 and serves
+        # only as a cache-key discriminator; key derivation still uses
+        # self.pepper and is bit-for-bit unchanged.
+        self._pepper_commitment = hmac.new(
+            pepper.encode("utf-8"), b"fibcrypt-cache-commitment", hashlib.sha256
+        ).digest()
         self._key_cache: "Dict[tuple, bytes]" = {}
         self._cache_lock = threading.Lock()
         self._session_lock = threading.Lock()
@@ -770,7 +893,7 @@ class CryptoContext:
         cache_key = (
             self.password,
             self.salt,
-            self.pepper,
+            self._pepper_commitment,
             key_material,
             domain,
             self.iterations,
@@ -1068,6 +1191,11 @@ class CryptoContext:
         regressed value is rejected because it would reuse the session AEAD
         nonce. ``allow_sequence_reuse=True`` disables that sender check.
 
+        New deployments should configure the context with
+        ``RECOMMENDED_ITERATIONS`` (2048); the historical 128 default logs a
+        one-time process-wide warning because it is kept only for
+        compatibility with existing ciphertexts.
+
         Args:
             plaintext: UTF-8 text to encrypt.
             sequence_number: Required for replay protection and session mode.
@@ -1089,6 +1217,11 @@ class CryptoContext:
     def decrypt(self, ciphertext: bytes, *, aad: bytes = b"") -> str:
         """Authenticate and decrypt an FC2-FC8 payload for this context.
 
+        The context's ``iterations`` must match the value the ciphertext was
+        created with; never change it for existing ciphertexts. The
+        ``RECOMMENDED_ITERATIONS`` (2048) guidance applies only to new
+        encryption setups, so decryption never warns about it.
+
         Args:
             ciphertext: Versioned ciphertext returned by ``encrypt``.
             aad: Additional authenticated data supplied during encryption.
@@ -1104,7 +1237,17 @@ class CryptoContext:
         return self._decrypt(ciphertext, aad=aad)
 
     def clear_cache(self) -> None:
-        """Clear the derived key cache."""
+        """Drop all cached derived keys, including the cached session key.
+
+        Derived keys are otherwise kept in a bounded in-process cache for as
+        long as the context lives. Python strings and bytes are immutable, so
+        neither the pepper nor a derived key can truly be zeroized; this method
+        limits the secret surface by releasing the cached key material early.
+        Long-lived processes should call it when a context goes idle; the next
+        encryption or decryption transparently repopulates the cache. The
+        context's configured ``password``/``pepper`` attributes remain the
+        caller's own state and are not modified here.
+        """
         with self._cache_lock:
             self._key_cache.clear()
         with self._session_lock:
@@ -1132,7 +1275,9 @@ def encrypt(
         password: Password input for the Fibonacci-based KDF.
         salt: Public caller-provided context required during decryption.
         pepper: Secret deployment value of at least 32 UTF-8 bytes.
-        iterations: Number of Fibonacci KDF rounds.
+        iterations: Number of Fibonacci KDF rounds. New setups should use
+            ``RECOMMENDED_ITERATIONS`` (2048); the 128 default logs a one-time
+            process-wide warning on encryption entry points.
         prime: Positive modulus used by the Fibonacci arithmetic.
         cipher_mode: AES-GCM or ChaCha20-Poly1305.
 
@@ -1147,6 +1292,7 @@ def encrypt(
     _validate_pepper(pepper)
     _validate_kdf_parameters(iterations, prime)
     _validate_cipher_mode(cipher_mode)
+    _warn_low_iterations(iterations, "encrypt()")
     if cipher_mode == CipherMode.CHACHA20_POLY1305:
         return _encrypt_chacha20(
             plaintext, password, salt, pepper, iterations, prime
@@ -1176,6 +1322,11 @@ def decrypt(
     be a replay. Pass ``strict_replay=True`` to reject such payloads with
     ``ValueError`` and use ``CryptoContext`` with ``replay_protection=True`` to
     enforce the sequence window.
+
+    The ``iterations`` value must be the one the ciphertext was created with;
+    never change it for existing ciphertexts. The
+    ``RECOMMENDED_ITERATIONS`` (2048) guidance applies only to new encryption
+    setups, so this function never warns about compatibility values.
 
     Args:
         ciphertext: Versioned FC2, FC3, FC4, FC5, or FC6 payload.

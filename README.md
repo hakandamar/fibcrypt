@@ -6,7 +6,7 @@
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-**Latest version:** `v1.2.2` · **Tests:** `329 passed` · **Coverage:** `97%`
+**Latest version:** `v1.2.2` · **Tests:** `342 passed` · **Coverage:** `97%`
 
 `fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
 with authenticated encryption.
@@ -30,6 +30,7 @@ for Argon2, scrypt, or other independently reviewed password KDFs.
 - [Parameters](#parameters)
 - [KDF Comparison](#kdf-comparison)
 - [Performance](#performance)
+  - [v1.2.2 hardening A/B benchmark](#v122-hardening-ab-benchmark)
   - [v1.2.1 KDF chain benchmark](#v121-kdf-chain-benchmark)
   - [v1.2.0 vs v1.2.1 Performance Benchmark](#v120-v121-performance-benchmark)
   - [v1.1.2 vs v1.2.0 High-Performance Session Benchmark](#v112-v120-high-performance-session-benchmark)
@@ -275,6 +276,12 @@ ct = ctx_rp.encrypt("telemetry", sequence_number=1, aad=b"device-7")
 pt = ctx_rp.decrypt(ct, aad=b"device-7")
 ```
 
+The cache holds derived keys for the lifetime of the context and uses a one-way
+HMAC-SHA256 commitment of the pepper as part of each cache key, never the raw pepper string. Python strings and bytes
+are immutable, so cached secrets cannot be zeroized; in long-lived processes call `ctx.clear_cache()` when the context
+goes idle to release the cached key material early (the next operation transparently repopulates the cache), which
+keeps the in-memory secret surface bounded.
+
 ## Parameters
 
 The default public API uses:
@@ -317,6 +324,15 @@ Reference specifications: [RFC 9106 (Argon2)](https://www.rfc-editor.org/rfc/rfc
 [RFC 7914 (scrypt)](https://www.rfc-editor.org/rfc/rfc7914.html).
 
 ## Performance
+
+### v1.2.2 hardening A/B benchmark
+
+The v1.2.2 security hardening (sender sequence enforcement, replay-guard warnings, cache
+commitments, fallback cache, warnings, dependency pins) was benchmarked A/B against the
+pre-hardening tree on Apple Silicon: every operation stayed within ±2% of baseline, so
+the hardening has no measurable cost. The FC4/FC6 decrypt medians measure slightly
+higher than the 2026-09-12 table below; the A/B run attributes this to the test
+environment, not to code changes. Full numbers: [bench_results.md](bench_results.md).
 
 ### v1.2.1 KDF chain benchmark
 

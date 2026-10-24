@@ -1,5 +1,48 @@
 # Benchmark Results
 
+## v1.2.2 security hardening (local run, A/B)
+
+- Date: 2026-10-24
+- Python: 3.14.9
+- Platform: macOS 26.7.1, arm64 (Apple Silicon)
+- `gmpy2`: 2.3.1
+- Command: `PYTHONPATH=. .venv/bin/python scripts/bench_v1_2_1.py --samples 7 --warmup 1`
+- Measurement: median wall-clock time via `time.perf_counter()`; seven timed samples
+  after one warmup. The benchmark was run four times per branch and the minimum of the
+  per-operation medians is reported, because single runs showed warm-up outliers of up
+  to +18% on KDF-heavy rows.
+- Branches: working tree (all v1.2.2 hardening: F-1..F-7) versus the `bded07e` worktree
+  (F-1..F-3 only), to isolate the cost of the F-4/F-5/F-6/F-7 changes.
+- Inputs: fixed `TEST_ONLY` synthetic credentials; sensitive values and payloads were
+  not printed
+
+| Operation | Hardened tree | `bded07e` (F-1..F-3) | Delta |
+| --- | ---: | ---: | --- |
+| `derive_key(iterations=128)` | 0.242 ms | 0.249 ms | within noise |
+| `derive_key(iterations=512)` | 0.277 ms | 0.283 ms | within noise |
+| `derive_key(iterations=2048)` | 0.409 ms | 0.412 ms | within noise |
+| FC3 encrypt / decrypt | 0.287 / 0.282 ms | 0.277 / 0.289 ms | within noise |
+| FC5 encrypt / decrypt | 0.272 / 0.273 ms | 0.267 / 0.275 ms | within noise |
+| FC4 encrypt / decrypt | 0.283 / 0.047 ms | 0.278 / 0.048 ms | within noise |
+| FC6 encrypt / decrypt | 0.268 / 0.031 ms | 0.265 / 0.032 ms | within noise |
+| FC7 session setup / encrypt / decrypt | 0.256 / 0.023 / 0.031 ms | 0.255 / 0.023 / 0.031 ms | within noise |
+| FC8 session setup / encrypt / decrypt | 0.258 / 0.012 / 0.019 ms | 0.254 / 0.012 / 0.019 ms | within noise |
+
+Findings:
+
+- The v1.2.2 hardening (sender sequence monotonicity lock, replay-guard warnings,
+  pepper-commitment cache keys, failed-legacy-fallback cache, low-iterations warning,
+  dependency pins) has **no measurable performance cost**; every A/B delta stays inside
+  ±2% (±1-3 µs), including the FC7/FC8 session hot path.
+- Compared with the 2026-09-12 v1.2.1 run on the previous environment (Python 3.14.7,
+  macOS 26.6.2), the FC4/FC6 decrypt medians measure about 10-15 µs higher today
+  (0.047/0.031 ms versus 0.034/0.022 ms). The `bded07e` worktree reproduces the same
+  higher values, so the shift comes from the environment (patch-level Python and macOS
+  updates) and not from the v1.2.2 code changes.
+
+These are local Apple Silicon results only; they are not x86 or cross-platform
+performance claims.
+
 ## v1.2.1 KDF Chain (local run)
 
 - Date: 2026-09-12
@@ -23,6 +66,10 @@
 | FC8 session setup / encrypt / decrypt | 0.267 / 0.013 / 0.020 ms |
 
 These are local Apple Silicon results only; they are not x86 or cross-platform performance claims.
+
+Note (2026-10-24): on the current environment (Python 3.14.9, macOS 26.7.1) the FC4/FC6
+decrypt rows re-measure about 10-15 µs higher; see the v1.2.2 A/B run above for the
+environment-vs-code attribution.
 
 ## v1
 

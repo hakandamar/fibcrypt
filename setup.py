@@ -21,10 +21,10 @@ setup(
     license="MIT",
     packages=find_packages(),
     install_requires=[
-        "pycryptodomex>=3.22.0"
+        "pycryptodomex>=3.22.0,<4"
     ],
     extras_require={
-        "gmpy2": ["gmpy2>=2.1.0"],
+        "gmpy2": ["gmpy2>=2.1.0,<3"],
     },
     python_requires=">=3.8",
     classifiers=[

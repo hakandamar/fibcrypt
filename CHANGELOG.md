@@ -29,6 +29,25 @@ v1.2.1. No wire formats changed; FC2-FC8 remain fully compatible.
   session ID derive the same session key and share one nonce space. Pass
   distinct directions (for example `uplink`/`downlink`) for bidirectional
   channels.
+- The derived-key cache no longer stores the raw pepper string. Each cache key
+  now embeds a one-way HMAC-SHA256 commitment of the pepper, so inspecting the
+  cache (dumps, reprs, debug tooling) does not expose the deployment secret.
+  Key derivation and every derived key are bit-for-bit unchanged. Long-lived
+  processes can call `ctx.clear_cache()` when idle to release cached key
+  material early.
+- Repeated decryption of the same corrupted or forged `FC3`/`FC4` payload no
+  longer re-runs the pre-HKDF legacy key derivation. Failed legacy fallbacks
+  are remembered in a bounded, thread-safe FIFO set (1024 entries), cutting
+  the worst-case double-KDF cost per repeated bad payload. The observable
+  error is unchanged and genuine legacy ciphertexts are unaffected.
+- New encryption setups using `iterations` below the recommended work factor
+  now log a one-time warning, and the new `RECOMMENDED_ITERATIONS` constant
+  (2048) is exported. The historical `128` default stays for wire
+  compatibility; decryption paths never warn because a ciphertext must always
+  be opened with the iteration count it was created with.
+- Runtime dependencies are upper-bounded: `pycryptodomex>=3.22,<4` and the
+  optional `gmpy2>=2.1,<3` extra, limiting silent supply-chain behavior
+  changes across major versions.
 
 ### Compatibility notes
 
@@ -41,8 +60,22 @@ v1.2.1. No wire formats changed; FC2-FC8 remain fully compatible.
 
 ### Quality
 
-- 20 new security-hardening regression tests (`329 passed` total, `97%`
-  coverage).
+- 33 security-hardening regression tests in total (13 added in the second batch
+  with the parametrized cases counted; `342 passed` overall, `97%` coverage),
+  covering sequence monotonicity, replay-guard warnings and
+  `strict_replay`, pepper-commitment cache keys, the failed-legacy-fallback
+  cache, and the one-time low-iterations warning.
+
+### Performance
+
+- A repeat benchmark A/B on Apple Silicon (see `bench_results.md`, v1.2.2 run) shows
+  no measurable cost from the hardening: every operation stays within ±2% of the
+  pre-hardening baseline, including the FC7/FC8 session hot path with the new
+  sender sequence lock.
+- FC4/FC6 decrypt medians re-measure about 10-15 µs higher than the 2026-09-12
+  v1.2.1 table (0.047/0.031 ms versus 0.034/0.022 ms). The A/B run attributes this
+  to the test environment (patch-level Python 3.14.9 / macOS 26.7.1), not to
+  v1.2.2 code changes.
 
 ## v1.2.1 — 2026-09-12
 
