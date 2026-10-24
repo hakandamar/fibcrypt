@@ -61,10 +61,13 @@ v1.2.1. No wire formats changed; FC2-FC8 remain fully compatible.
 ### Quality
 
 - 33 security-hardening regression tests in total (13 added in the second batch
-  with the parametrized cases counted; `342 passed` overall, `97%` coverage),
-  covering sequence monotonicity, replay-guard warnings and
+  with the parametrized cases counted) plus version-metadata sync guards;
+  `344 passed` overall at `97%` coverage. The hardening suite covers sequence
+  monotonicity, replay-guard warnings and
   `strict_replay`, pepper-commitment cache keys, the failed-legacy-fallback
   cache, and the one-time low-iterations warning.
+- The package now exposes `fibcrypt.__version__`, and `setup.py` derives the
+  distribution version from it, eliminating the second version literal.
 
 ### Performance
 

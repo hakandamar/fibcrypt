@@ -1,11 +1,22 @@
+import re
+from pathlib import Path
+
 from setuptools import find_packages, setup
 
 with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()
 
+_init_source = Path(__file__).parent.joinpath("fibcrypt", "__init__.py").read_text(
+    encoding="utf-8"
+)
+_match = re.search(r'^__version__ = "([^"]+)"', _init_source, re.MULTILINE)
+if not _match:
+    raise RuntimeError("unable to locate __version__ in fibcrypt/__init__.py")
+version = _match.group(1)
+
 setup(
     name="fibcrypt",
-    version="1.2.2",
+    version=version,
     description="A fast Fibonacci-based cryptographic toolkit",
     long_description=long_description,
     long_description_content_type="text/markdown",
