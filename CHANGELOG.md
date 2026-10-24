@@ -2,6 +2,48 @@
 
 All notable changes to `fibcrypt` are documented here.
 
+## v1.2.2 — 2026-10-24
+
+### Security hardening
+
+This release closes the actionable findings of an internal security review of
+v1.2.1. No wire formats changed; FC2-FC8 remain fully compatible.
+
+- Session-mode senders are now protected against AEAD nonce reuse: within one
+  `CryptoContext` in high-performance (FC7/FC8) mode, `encrypt()` rejects any
+  `sequence_number` that is not greater than the last sequence number sent
+  from that context. Reusing a sequence number under a single session key
+  repeats the GCM/ChaCha20-Poly1305 nonce and leaks the keystream XOR of the
+  two plaintexts, so the check is enforced by default. `decrypt()` never
+  changes this sender state. The escape hatch `allow_sequence_reuse=True`
+  disables the check (with a one-time warning) for controlled recovery or
+  testing only.
+- Decrypting `FC4`/`FC6` replay-protected payloads without an active replay
+  guard (the stateless `decrypt()` or a context with
+  `replay_protection=False`) now logs a warning on every such message instead
+  of silently accepting possible replays. The new `strict_replay=True` option
+  (on `CryptoContext` and on the stateless `decrypt()`) rejects those
+  unguarded decryptions with `ValueError`.
+- Creating a high-performance context with the default `direction` now logs a
+  construction-time warning: both endpoints keeping the default on the same
+  session ID derive the same session key and share one nonce space. Pass
+  distinct directions (for example `uplink`/`downlink`) for bidirectional
+  channels.
+
+### Compatibility notes
+
+- Existing code that used strictly increasing session sequence numbers is
+  unaffected. Code that intentionally replayed sequence numbers (previously a
+  silent cryptographic break) now receives a `ValueError` unless
+  `allow_sequence_reuse=True` is set.
+- The new warnings do not change return values; use `strict_replay=True` to
+  opt into hard rejection of unguarded `FC4`/`FC6` decryptions.
+
+### Quality
+
+- 20 new security-hardening regression tests (`329 passed` total, `97%`
+  coverage).
+
 ## v1.2.1 — 2026-09-12
 
 ### Performance

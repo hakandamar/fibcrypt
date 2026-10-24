@@ -6,7 +6,7 @@
 [![CI](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/hakandamar/fibcrypt/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/fibcrypt.svg)](LICENSE)
 
-**Latest version:** `v1.2.1` · **Tests:** `309 passed` · **Coverage:** `96%`
+**Latest version:** `v1.2.2` · **Tests:** `329 passed` · **Coverage:** `97%`
 
 `fibcrypt` is an open-source, edge-oriented encryption toolkit that combines a Fibonacci-based key derivation design
 with authenticated encryption.
@@ -165,11 +165,25 @@ plaintext = receiver.decrypt(ciphertext, aad=b"base-station")
 ```
 
 `sequence_number` is required in high-performance mode even when replay protection is disabled because it provides the
-per-message AEAD nonce. A sequence number must never be reused with the same session ID and direction. Use distinct
-session IDs or directions for uplink and downlink traffic. The `session_id` must be explicitly shared with both
-endpoints; this prevents an attacker from forcing a receiver to derive unbounded numbers of session keys.
-High-performance contexts reject the default `FC3`/`FC5` and replay `FC4`/`FC6` payloads so that a deployment cannot
-silently fall back to per-message KDF.
+per-message AEAD nonce. Within one `CryptoContext`, sequence numbers must strictly increase: the sender rejects any
+`encrypt()` call whose `sequence_number` is not greater than the last value sent from that context. This is not a
+cosmetic limit — reusing a sequence number under the same session key repeats the AEAD nonce, and for AES-GCM that
+keystream reuse is a total break of confidentiality for both messages (plus a forgery risk). `decrypt()` never changes
+this sender state. `allow_sequence_reuse=True` disables the sender check for controlled recovery or testing scenarios
+and logs a warning on first use; do not enable it in production.
+
+Use distinct session IDs or directions for uplink and downlink traffic. A high-performance context created without an
+explicit `direction` (the default `"default"` value) logs a warning at construction, because two endpoints that both
+keep the default on the same session ID derive the same session key and share one nonce space. The `session_id` must be
+explicitly shared with both endpoints; this prevents an attacker from forcing a receiver to derive unbounded numbers of
+session keys. High-performance contexts reject the default `FC3`/`FC5` and replay `FC4`/`FC6` payloads so that a
+deployment cannot silently fall back to per-message KDF.
+
+Decryption of `FC4`/`FC6` payloads without an active replay guard — the stateless `decrypt()` function or a
+`CryptoContext` with `replay_protection=False` — logs a warning on every such message, because a copied payload would
+be accepted as valid. Pass `strict_replay=True` (to `CryptoContext` or to the stateless `decrypt()`) to reject those
+unguarded `FC4`/`FC6` decryptions with `ValueError` instead. This applies to `FC4`/`FC6` only; `FC7`/`FC8` session
+decryption keeps the behavior described above.
 
 For a ciphertext-only attacker who has no password, caller salt, or pepper, the payload and public source code are not
 sufficient to derive the keys. This assumes the deployment pepper is a high-entropy secret and is not embedded in

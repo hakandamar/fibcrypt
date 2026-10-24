@@ -194,6 +194,37 @@ def _require_sequence_number(
     return sequence_number
 
 
+def _require_replay_guard(
+    version: bytes,
+    replay_guard: Optional[ReplayGuard],
+    *,
+    strict_replay: bool = False,
+) -> None:
+    """Warn or reject when a replay-protected format is decrypted without a guard.
+
+    ``FC4``/``FC6`` payloads bind a sequence number, but that binding is only
+    enforced when an active :class:`ReplayGuard` checks it. Decrypting such a
+    payload without a guard silently accepts replays, so a warning is logged on
+    every unprotected decryption. With ``strict_replay=True`` the decryption is
+    rejected with ``ValueError`` instead.
+    """
+
+    if replay_guard is not None:
+        return
+    name = version.decode("ascii")
+    if strict_replay:
+        raise ValueError(
+            f"{name} ciphertext requires replay protection; strict_replay is "
+            "enabled but no replay guard is configured for this decryption"
+        )
+    logger.warning(
+        "%s replay-protected ciphertext decrypted without a replay guard; the "
+        "message could be a replay (enable replay_protection or configure "
+        "strict_replay=True to enforce replay checks)",
+        name,
+    )
+
+
 def _encrypt_aes_gcm(
     plaintext: str,
     password: str,
@@ -635,6 +666,10 @@ class CryptoContext:
     encrypted message. Enabling ``high_performance`` selects FC7/FC8 and
     derives one session key during initialization; it always requires a
     16-byte ``session_id`` and a sequence number for nonce construction.
+    Session-mode senders must additionally use strictly increasing sequence
+    numbers per context (see ``allow_sequence_reuse``), and decrypting FC4/FC6
+    payloads without an active replay guard logs a warning unless
+    ``strict_replay=True`` rejects them.
     """
 
     def __init__(
@@ -651,6 +686,8 @@ class CryptoContext:
         high_performance: bool = False,
         session_id: Optional[bytes] = None,
         direction: str = "default",
+        strict_replay: bool = False,
+        allow_sequence_reuse: bool = False,
     ) -> None:
         """Create a context and validate its wire-format configuration.
 
@@ -666,6 +703,17 @@ class CryptoContext:
             high_performance: Use the one-key-per-session FC7/FC8 formats.
             session_id: Exactly 16 bytes shared by both session endpoints.
             direction: Session traffic direction included in key separation.
+                Leaving the default on both endpoints of a bidirectional
+                channel shares one session key and nonce space and logs a
+                warning.
+            strict_replay: Reject FC4/FC6 payloads with ``ValueError`` when no
+                replay guard is active for the decryption. Without it such
+                payloads are decrypted with a warning.
+            allow_sequence_reuse: Disable the session-mode sender check that
+                each ``encrypt`` uses a sequence number greater than the last
+                one sent from this context. Only intended for controlled
+                recovery or testing; enabling it logs a warning on first use
+                because sequence reuse repeats the session AEAD nonce.
 
         Raises:
             ValueError: If a parameter is invalid or session mode is
@@ -680,6 +728,14 @@ class CryptoContext:
             _validate_direction(direction)
             if session_id is None:
                 raise ValueError("session_id is required when high_performance=True")
+            if direction == "default":
+                logger.warning(
+                    "high_performance context uses the default direction; two "
+                    "endpoints of a bidirectional channel then derive the same "
+                    "session key and share one nonce space, so equal sequence "
+                    "numbers cause AEAD nonce reuse. Pass distinct direction "
+                    "values such as 'uplink' and 'downlink'."
+                )
         elif session_id is not None:
             raise ValueError("session_id requires high_performance=True")
         self.password = password
@@ -693,12 +749,17 @@ class CryptoContext:
         self.high_performance = high_performance
         self.direction = direction
         self.session_id = session_id
+        self.strict_replay = strict_replay
+        self.allow_sequence_reuse = allow_sequence_reuse
         self._key_cache: "Dict[tuple, bytes]" = {}
         self._cache_lock = threading.Lock()
         self._session_lock = threading.Lock()
         self._active_session_id: Optional[bytes] = None
         self._active_session_version: Optional[bytes] = None
         self._active_session_key: Optional[bytes] = None
+        self._send_seq_lock = threading.Lock()
+        self._last_sent_sequence: Optional[int] = None
+        self._sequence_reuse_warned = False
         if high_performance:
             assert session_id is not None
             self._get_session_key(session_id, self._version_for_mode())
@@ -797,6 +858,42 @@ class CryptoContext:
             raise ValueError("Ciphertext session_id does not match this context")
         return self._get_session_key(session_id, version)
 
+    def _remember_sent_sequence(self, sequence_number: int) -> None:
+        """Enforce per-context increasing session-mode sender sequence numbers.
+
+        In FC7/FC8 session mode the AEAD nonce is derived directly from the
+        sequence number under a single session key, so sending two messages
+        with the same (or a regressed) sequence number reuses that nonce and
+        leaks the keystream XOR of the two plaintexts. This context therefore
+        rejects any ``encrypt`` whose sequence number is not greater than the
+        last one it sent. Decryption never touches this state. Set
+        ``allow_sequence_reuse=True`` to disable the check for controlled
+        recovery or testing scenarios.
+        """
+
+        with self._send_seq_lock:
+            if self.allow_sequence_reuse:
+                if not self._sequence_reuse_warned:
+                    self._sequence_reuse_warned = True
+                    logger.warning(
+                        "allow_sequence_reuse=True disables the session-mode "
+                        "sender sequence check; non-increasing sequence "
+                        "numbers are accepted and reuse the session AEAD "
+                        "nonce, which breaks the encryption"
+                    )
+                return
+            last_sent = self._last_sent_sequence
+            if last_sent is not None and sequence_number <= last_sent:
+                raise ValueError(
+                    f"sequence_number must be greater than the last sequence "
+                    f"number sent from this context: {sequence_number} <= "
+                    f"{last_sent}. Reusing a session sequence number repeats "
+                    "the AEAD nonce under the session key and leaks the "
+                    "keystream; pass allow_sequence_reuse=True only for "
+                    "controlled recovery or testing"
+                )
+            self._last_sent_sequence = sequence_number
+
     def _encrypt(
         self,
         plaintext: str,
@@ -813,6 +910,7 @@ class CryptoContext:
             sequence_number = _require_sequence_number(
                 sequence_number, feature="high-performance mode"
             )
+            self._remember_sent_sequence(sequence_number)
             version = self._version_for_mode()
             key = self._get_session_key(session_id, version)
             if self.cipher_mode == CipherMode.CHACHA20_POLY1305:
@@ -899,6 +997,9 @@ class CryptoContext:
                 self.prime,
             )
         if version == _REPLAY_VERSION:
+            _require_replay_guard(
+                version, self.replay_guard, strict_replay=self.strict_replay
+            )
             return _decrypt_aes_gcm(
                 ciphertext,
                 self.password,
@@ -924,6 +1025,9 @@ class CryptoContext:
                 encryption_key=self._cached_key_for_ciphertext(ciphertext, version),
             )
         if version == _CHACHA_REPLAY_VERSION:
+            _require_replay_guard(
+                version, self.replay_guard, strict_replay=self.strict_replay
+            )
             return _decrypt_chacha20(
                 ciphertext,
                 self.password,
@@ -959,6 +1063,11 @@ class CryptoContext:
     ) -> bytes:
         """Encrypt a message using this context's configured wire format.
 
+        In high-performance (FC7/FC8) mode each call must use a sequence
+        number greater than the last one sent from this context; a repeated or
+        regressed value is rejected because it would reuse the session AEAD
+        nonce. ``allow_sequence_reuse=True`` disables that sender check.
+
         Args:
             plaintext: UTF-8 text to encrypt.
             sequence_number: Required for replay protection and session mode.
@@ -968,8 +1077,9 @@ class CryptoContext:
             A versioned FC3-FC8 ciphertext payload.
 
         Raises:
-            ValueError: If the sequence number is missing or invalid, or if
-                the context configuration is invalid.
+            ValueError: If the sequence number is missing, invalid, or (in
+                session mode) not greater than the last sequence number sent
+                from this context, or if the context configuration is invalid.
         """
 
         if self.replay_protection and not self.high_performance:
@@ -1053,11 +1163,19 @@ def decrypt(
     pepper: str,
     iterations: int = 128,
     prime: int = DEFAULT_PRIME,
+    *,
+    strict_replay: bool = False,
 ) -> str:
     """Authenticate and decrypt a stateless FC2-FC6 payload.
 
     FC7/FC8 session payloads carry context-specific state and must be decrypted
     with ``CryptoContext.decrypt`` instead of this stateless function.
+
+    This function has no replay state, so FC4/FC6 payloads are always decrypted
+    without replay protection and a warning is logged because the message could
+    be a replay. Pass ``strict_replay=True`` to reject such payloads with
+    ``ValueError`` and use ``CryptoContext`` with ``replay_protection=True`` to
+    enforce the sequence window.
 
     Args:
         ciphertext: Versioned FC2, FC3, FC4, FC5, or FC6 payload.
@@ -1066,12 +1184,15 @@ def decrypt(
         pepper: The same secret deployment value used during encryption.
         iterations: Number of Fibonacci KDF rounds used during encryption.
         prime: Positive modulus used during encryption.
+        strict_replay: Reject FC4/FC6 payloads that this stateless function
+            cannot replay-check.
 
     Returns:
         The authenticated UTF-8 plaintext.
 
     Raises:
-        ValueError: If the payload is malformed or authentication fails.
+        ValueError: If the payload is malformed, authentication fails, or
+            ``strict_replay=True`` rejects a replay-protected payload.
     """
 
     _validate_pepper(pepper)
@@ -1080,8 +1201,12 @@ def decrypt(
     if version == _LEGACY_VERSION:
         return _decrypt_legacy(ciphertext, password, salt, pepper, iterations, prime)
     elif version in (_VERSION, _REPLAY_VERSION):
+        if version == _REPLAY_VERSION:
+            _require_replay_guard(version, None, strict_replay=strict_replay)
         return _decrypt_aes_gcm(ciphertext, password, salt, pepper, iterations, prime)
     elif version in (_CHACHA_VERSION, _CHACHA_REPLAY_VERSION):
+        if version == _CHACHA_REPLAY_VERSION:
+            _require_replay_guard(version, None, strict_replay=strict_replay)
         return _decrypt_chacha20(ciphertext, password, salt, pepper, iterations, prime)
     else:
         raise ValueError("Unsupported or malformed ciphertext")
